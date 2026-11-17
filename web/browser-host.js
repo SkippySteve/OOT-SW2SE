@@ -180,6 +180,16 @@
     return data;
   }
 
+  // Guides open in a new tab, but only IGN's wiki for this game, like the
+  // desktop hosts.
+  const GUIDE_PREFIX = 'https://www.ign.com/wikis/ocarina-of-time-remake/';
+  function guideUrl(url) {
+    if (typeof url !== 'string' || url.length > 500 || !url.startsWith(GUIDE_PREFIX) || /["<>\\\s]/.test(url)) {
+      throw new HostError("Only IGN's Ocarina of Time Remake guides can be opened.");
+    }
+    return url;
+  }
+
   // Keeps only the last path part; an empty or odd name gets a default.
   function fileName(name) {
     const base = String(name ?? '').split(/[/\\]/).pop();
@@ -187,7 +197,7 @@
   }
 
   if (typeof module === 'object' && module.exports) {
-    module.exports = { backupLayout, readBackup, decodePatchFiles, decodePatchZip, fileName, CANDIDATES, PORT_BASES,
+    module.exports = { backupLayout, readBackup, decodePatchFiles, decodePatchZip, fileName, guideUrl, CANDIDATES, PORT_BASES,
       profileCandidates, HostError };
     return;
   }
@@ -314,6 +324,10 @@
     openBackup: () => folderAccess ? openBackupFromHandle() : openBackupFromInput(),
     savePatch,
     saveFolder,
+    openUrl: message => {
+      window.open(guideUrl(message.url), '_blank', 'noopener,noreferrer');
+      return true;
+    },
   };
   const listeners = new Set();
   const notify = data => {

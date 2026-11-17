@@ -165,7 +165,7 @@ test('the build adds the browser host in front of the unchanged editor', async (
     assert.deepEqual(fs.readdirSync(out).sort(), ['LICENSE.txt', 'favicon.ico', 'index.html']);
     const page = fs.readFileSync(path.join(out, 'index.html'), 'utf8');
     assert.equal(page, buildPage(html, fs.readFileSync(path.join(root, 'web/browser-host.js'), 'utf8'), version));
-    assert.ok(page.includes('v' + version + '</span>') && !page.includes('{{EDITOR_VERSION}}'));
+    assert.ok(page.includes('>v' + version + '<') && !page.includes('{{EDITOR_VERSION}}'));
     // Same policy, host script first, then the editor; nothing else changed.
     const csp = html.match(/<meta http-equiv="Content-Security-Policy"[^>]*>/)[0];
     assert.ok(page.includes(csp));
@@ -178,4 +178,13 @@ test('the build adds the browser host in front of the unchanged editor', async (
   assert.throws(() => buildPage(html.replace(/<meta http-equiv="Content-Security-Policy"[^>]*>/, ''), '', '1.0.0'),
     /Content-Security-Policy/);
   assert.throws(() => buildPage(html, '</script>', '1.0.0'), /must not close/);
+});
+
+test('guide links open only IGN\'s Ocarina of Time Remake wiki', () => {
+  assert.equal(host.guideUrl('https://www.ign.com/wikis/ocarina-of-time-remake/All_Song_Locations'),
+    'https://www.ign.com/wikis/ocarina-of-time-remake/All_Song_Locations');
+  for (const url of ['https://evil.example/', 'javascript:alert(1)', 'https://www.ign.com/wikis/other/',
+    'https://www.ign.com/wikis/ocarina-of-time-remake/a b', 'https://www.ign.com/wikis/ocarina-of-time-remake/"x', null]) {
+    assert.throws(() => host.guideUrl(url), /Only IGN/);
+  }
 });

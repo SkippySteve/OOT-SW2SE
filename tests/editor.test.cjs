@@ -208,6 +208,55 @@ test('Save Copy of a real edit: the copied slot reads back with the edit, the ot
   assert.equal(api.readSlot(edited.p, edited.c).rupees, 0, 'the opened bytes are unchanged');
 });
 
+test('Equip sets the sword or shield for the current era, only for owned items that era can use', () => {
+  const { equipIssue, currentEra, equippedItem } = vm.runInContext('({ equipIssue, currentEra, equippedItem })', context);
+  const childhood = 0xCEA220D3;
+  const f = fixture(['Weapon_Sword_Kokiri', 'Weapon_Shield_Deku', 'Weapon_Shield_Mirror']);
+  f.string(0xA95A3521, 'Weapon_Sword_Kokiri'); f.string(0xEE463235, 'Weapon_Shield_Deku');
+  f.set(childhood, 1);
+  const slot = f.slot();
+  assert.equal(currentEra(slot.p), 'child');
+  // Add the Hylian Shield and equip it in the same patch; nothing else moves.
+  const after = edit(f, { additions: [item('Weapon_Shield_Hylian')], equip: ['Weapon_Shield_Hylian'] });
+  assert.equal(equippedItem(after.p, 'shield'), 'Weapon_Shield_Hylian');
+  assert.equal(equippedItem(after.p, 'weapon'), 'Weapon_Sword_Kokiri');
+  const moved = changedHashes(slot.p, after.p);
+  assert.ok(moved.includes(item('Weapon_Shield_Hylian')) && !moved.includes(childhood));
+  // Refused: not owned, wrong era, two of a kind, unknown era.
+  assert.throws(() => edit(f, { equip: ['Weapon_Sword_Master'] }), /as a child/);
+  assert.throws(() => edit(f, { equip: ['Weapon_Shield_Mirror'] }), /as a child/);
+  assert.throws(() => edit(f, { equip: ['Weapon_Shield_Hylian'] }), /doesn't have/);
+  assert.throws(() => edit(f, { equip: ['Item_Boomerang'] }), /can't be equipped/);
+  assert.throws(() => edit(f, { additions: [item('Weapon_Shield_Hylian')], equip: ['Weapon_Shield_Hylian', 'Weapon_Shield_Deku'] }), /Choose one shield/);
+  f.set(childhood, 0);
+  assert.equal(edit(f, { equip: ['Weapon_Shield_Mirror'] }).p.string(0xEE463235, 64), 'Weapon_Shield_Mirror');
+  assert.match(equipIssue(f.slot().p, 'Weapon_Shield_Deku', editable), /as an adult/);
+  new DataView(f.p.buffer).setUint32(40 + catalog.fields.findIndex(([h]) => h === childhood) * 8, 0, true);
+  assert.throws(() => edit(f, { equip: ['Weapon_Shield_Mirror'] }), /child or an adult/);
+});
+
+test('every checklist objective links a guide page, and walkthrough chapters track progress', () => {
+  const { guidePages, chapterMarks, chapterDone, objectiveGuide, guideSection, areaName } =
+    vm.runInContext('({ guidePages, chapterMarks, chapterDone, objectiveGuide, guideSection, areaName })', context);
+  const slugs = new Set(Array.from(guidePages, ([, slug]) => slug));
+  assert.equal(slugs.size, guidePages.length, 'no duplicate pages');
+  assert.equal(chapterMarks.length, 20);
+  for (let i = 0; i < 20; i++) {
+    assert.match(guidePages[i][0], /Walkthrough$/);
+    assert.equal(guideSection(i, guidePages[i][1]), 'Walkthrough');
+  }
+  const f = fixture(['Weapon_Sword_Kokiri', 'Item_Stone_Forest']);
+  for (const entry of api.progressChecklist(f.slot(), catalog)) {
+    const slug = objectiveGuide(entry);
+    assert.ok(slug && slugs.has(slug), entry.label + ' -> ' + slug);
+  }
+  const done = Array.from({ length: 20 }, (_, i) => chapterDone(i, f.slot(), catalog));
+  assert.deepEqual(done.slice(0, 6), [true, true, false, null, false, false]);
+  assert.equal(areaName('DodongoCavern'), 'Dodongo Cavern');
+  assert.equal(areaName('LostWood'), 'Lost Woods');
+  assert.equal(areaName('HyruleField_Child'), 'Hyrule Field Child');
+});
+
 test('save time is read from caption.sav to the second and shown as day.month.year', () => {
   const f = fixture(); setSaveTime(f, [2026, 11, 13, 0, 12, 41], 0);
   const time = api.saveTime(f.slot().c);
