@@ -11,6 +11,7 @@ Original editor by [Traiver](https://github.com/Traiver/OOT-SW2SE) and upstream 
 - Add missing items, including masks, with their acquisition flags set automatically.
 - Remove supported owned single items, optionally clearing their mapped acquisition flags. Acquisition history is kept by default; story and quest progress are not reset. Unequip weapons and shields in both eras first. Default clothes, quantities, and capacity upgrades use their own controls rather than inventory removal.
 - Export replacement files as a ZIP or to a new patch folder on Windows, macOS and Linux. Export names include a UTC timestamp followed by a UUID; replacement files sit inside a folder named with that same UTC timestamp (`yyyyMMdd_HHmmss`). Exports contain only replacement files, not a complete backup.
+- Open saves from the PC ports [Longshot](https://git.magicbean.dev/MagicBeanDev/LongshotLauncher) and [Project ReLink](https://github.com/pixl27/ProjectReLink), and save a complete copy of the save with the edits (**Save Copy ZIP**) so the original stays as it is. See [Saves from PC ports](#saves-from-pc-ports).
 - Toggle progress flags and change the spoken dialogue language when `option.sav` is available.
 - Open the most recently saved slot automatically, list every slot with its in-game save time, and give exported ZIP entries the slot's save time. See [Save time: newest slot and ZIP timestamps](#save-time-newest-slot-and-zip-timestamps).
 - On Linux only: save edits straight back into the opened files, with an automatic backup of the replaced files, and more. See [Linux version](#linux-version).
@@ -111,6 +112,26 @@ All logic is in `editor.html` and shared by every platform. No host changes are 
 | `openBackupFiles(files)` | Reads every slot's save time, labels the list and opens the newest slot  |
 
 To go back to the previous behavior, open `backup.slots[0]` in `openBackupFiles` and call `zip(entries)` without a time. `tests/editor.test.cjs` covers field order, seconds, validation, tie handling and ZIP timestamps.
+
+## Saves from PC ports
+
+The PC ports of the game keep the same save files as the Switch, `account.sav`, `option.sav` and one `slot_NN` folder per slot with `progress.sav` and `caption.sav`, in one folder per profile:
+
+| Port | Windows | Linux |
+| --- | --- | --- |
+| [Longshot](https://git.magicbean.dev/MagicBeanDev/LongshotLauncher) | `%APPDATA%\Longshot\save\<user id>\` | `~/.local/share/longshot/save/<user id>/` |
+| [Project ReLink](https://github.com/pixl27/ProjectReLink) | `<game folder>\user\save\<user id>\` (`%USERPROFILE%\Games\ReLink` by default) | `~/.local/share/relink/save/<user id>/` |
+
+The user id is `5a3c9e1f0b7d24680000000000000001` in both. **Open Backup** accepts that folder, the `save` folder, or the port's data or game folder (`Longshot`, `ReLink`, its `user` folder): the editor opens the save folder inside it. If several profile folders hold saves, it opens the one the ports use, or asks you to pick one when none of them is.
+
+The editor only reads the files it opens. To get the edits into the game without touching the original save, use **Save Copy ZIP**. It holds the whole save with the edits: every slot, `option.sav` and `account.sav`, in a folder named with the UTC export time. Then close the game and put the copy in place:
+
+- **Longshot:** in Longshot Launcher, **Saves** → **Import from emulator** → **Choose a folder**, and pick the extracted folder. The launcher backs up the current save before it replaces it.
+- **Project ReLink:** move the `<user id>` folder somewhere safe as your backup. Then copy the extracted folder into `save` and rename it to `<user id>`.
+
+On Linux, **Save Back** writes the edits straight into the port's save folder instead. It first keeps the files it replaces in a backup ZIP ([Save Back](linux/README.md#save-back)).
+
+Tested with the editor's checks and synthetic saves in these layouts, not with saves written by the ports.
 
 ## Changes in this fork
 
