@@ -1,2 +1,5 @@
 /.build/
 /dist/
+# The private update signing key (update/README.md) must never be committed.
+/update-signing-key.pem
+*-signing-key.pem

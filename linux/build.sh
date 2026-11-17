@@ -64,6 +64,10 @@ mkdir -p "$build/app"
 cp "$here/oot_sw2se.py" "$build/app/"
 cp "$repo/editor.html" "$repo/editor.ico" "$build/app/"
 cp "$repo/LICENSE" "$build/app/LICENSE.txt"
+# The key update manifests are signed with (update/README.md); without it, updates are off.
+if [[ -f "$repo/update/public-key.pem" ]]; then
+  cp "$repo/update/public-key.pem" "$build/app/update-key.pem"
+fi
 printf '%s\n' "$version" > "$build/app/VERSION"
 cat > "$build/app/__main__.py" <<'PY'
 import sys

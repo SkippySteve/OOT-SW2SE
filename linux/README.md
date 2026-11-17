@@ -184,7 +184,7 @@ them again.
 The AppImage works the same way, but it isn't copied:
 
 ```sh
-./OOT_SW2SE-1.0.2-x86_64.AppImage --install
+./OOT-SW2SE-2.0.0-linux-x86_64.AppImage --install
 ```
 
 The menu entry and the hidden entries start the AppImage from where it is, so
@@ -220,6 +220,7 @@ add the hidden entries (see [Browser window](#browser-window)).
 | `OOT_SW2SE_APP_BROWSER=none`      | Never open a window; always use a tab (like `--tab`)       |
 | `BROWSER=<command>`               | Browser for the tab, instead of the default browser        |
 | `OOT_SW2SE_DIALOG=kdialog\|zenity` | File dialog program                                       |
+| `OOT_SW2SE_NO_UPDATE_CHECK=1`     | Check for updates only when you click the version ([updates](../update/README.md)) |
 
 To use any other browser, start with `--no-browser` and open the printed
 address there.

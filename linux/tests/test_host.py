@@ -15,6 +15,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import unittest
 import zipfile
 from unittest import mock
@@ -172,6 +173,58 @@ class BackupReaderTests(TempDirTest):
         save_pair(os.path.join(self.root, "slot_01"))
         os.mkdir(os.path.join(self.root, "files"))
         self.assertEqual(paths(host.BackupReader.read(self.root))[0], "Backup/files/slot_01/progress.sav")
+
+    def port_save(self, saves: str, profile: str = host.PORT_GAME_USER) -> str:
+        """A PC port's profile folder: slots, option.sav and account.sav."""
+        folder = os.path.join(saves, profile)
+        save_pair(os.path.join(folder, "slot_00"))
+        save_pair(os.path.join(folder, "slot_03"))
+        write(os.path.join(folder, "option.sav"))
+        write(os.path.join(folder, "account.sav"), b"account")
+        return folder
+
+    PORT_PATHS = ["Backup/files/slot_00/progress.sav", "Backup/files/slot_00/caption.sav",
+                  "Backup/files/slot_03/progress.sav", "Backup/files/slot_03/caption.sav",
+                  "Backup/files/option.sav", "Backup/files/account.sav"]
+
+    def test_longshot_data_folder(self) -> None:
+        data = os.path.join(self.root, "longshot")
+        profile = self.port_save(os.path.join(data, "save"))
+        os.makedirs(os.path.join(data, "cache", "0"))
+        for picked in (data, os.path.join(data, "save"), profile):
+            self.assertEqual(paths(host.BackupReader.read(picked)), self.PORT_PATHS, picked)
+        account = host.BackupReader.read(data)[-1]
+        self.assertEqual(base64.b64decode(account["contents"]), b"account")
+
+    def test_relink_game_folder(self) -> None:
+        game = os.path.join(self.root, "Games", "ReLink")
+        self.port_save(os.path.join(game, "user", "save"))
+        os.makedirs(os.path.join(game, "romfs"))
+        write(os.path.join(game, "image.bin"))
+        for picked in (game, os.path.join(game, "user")):
+            self.assertEqual(paths(host.BackupReader.read(picked)), self.PORT_PATHS, picked)
+
+    def test_several_port_profiles(self) -> None:
+        saves = os.path.join(self.root, "longshot", "save")
+        self.port_save(saves, "0123456789abcdef0123456789abcdef")
+        os.makedirs(os.path.join(saves, "empty-profile"))
+        self.assertEqual(host.port_profile_folder(saves), os.path.join(saves, "0123456789abcdef0123456789abcdef"))
+        # The profile the ports open wins over a stray one.
+        game = self.port_save(saves)
+        self.assertEqual(host.port_profile_folder(saves), game)
+        self.assertEqual(host.port_profile_folder(os.path.dirname(saves)), game)
+        os.rename(game, os.path.join(saves, "fedcba9876543210fedcba9876543210"))
+        with self.assertRaisesRegex(host.HostError, "several profiles. Open one of them: "
+                                    "0123456789abcdef0123456789abcdef, fedcba9876543210fedcba9876543210"):
+            host.BackupReader.read(os.path.dirname(saves))
+
+    def test_saves_in_the_picked_folder_win_over_port_folders(self) -> None:
+        backup = os.path.join(self.root, "Backup")
+        save_pair(os.path.join(backup, "files", "slot_01"))
+        self.port_save(os.path.join(backup, "save"))
+        self.assertIsNone(host.port_profile_folder(backup))
+        self.assertEqual(paths(host.BackupReader.read(backup)),
+                         ["Backup/files/slot_01/progress.sav", "Backup/files/slot_01/caption.sav"])
 
     def test_no_saves(self) -> None:
         with self.assertRaisesRegex(host.HostError, "No folder containing"):
@@ -657,6 +710,21 @@ class SaveBackTests(TempDirTest):
         with open(os.path.join(backup, "manifest.json"), "rb") as file:
             self.assertEqual(file.read(), b"{}")
 
+    def test_port_data_folder_saves_back_into_the_profile(self) -> None:
+        data = os.path.join(self.root, "relink")
+        profile = os.path.join(data, "save", host.PORT_GAME_USER)
+        for name in ("progress.sav", "caption.sav"):
+            write(os.path.join(profile, "slot_01", name), SAVE + b"port " + name.encode())
+        write(os.path.join(profile, "account.sav"), SAVE + b"account")
+        self.assertIn("Backup/files/account.sav", self.open(data))
+        result = self.save_back({"Backup/files/slot_01/progress.sav": SAVE + b"port edited"})
+        with open(os.path.join(profile, "slot_01", "progress.sav"), "rb") as file:
+            self.assertEqual(file.read(), SAVE + b"port edited")
+        with zipfile.ZipFile(result["backup"]) as archive:
+            self.assertEqual(archive.read("slot_01/progress.sav"), SAVE + b"port progress.sav")
+        with open(os.path.join(profile, "account.sav"), "rb") as file:
+            self.assertEqual(file.read(), SAVE + b"account", "files that were not edited stay as they were")
+
     def test_page_announces_save_back(self) -> None:
         page = host.build_page(host.resource("editor.html").decode(), "1.0.0",
                                {"saveBack": {"backupFolder": "/x</script>"}}).decode()
@@ -842,3 +910,102 @@ class AppWindowTests(TempDirTest):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class UpdateTests(TempDirTest):
+    """Signed updates: the manifest, its signature, the download and the swap."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "update"))
+        import sign_manifest
+        self.signer = sign_manifest
+        self.key = os.path.join(self.root, "key.pem")
+        subprocess.run(["openssl", "ecparam", "-name", "prime256v1", "-genkey", "-noout", "-out", self.key], check=True,
+                       capture_output=True)
+        self.public = subprocess.run(["openssl", "ec", "-in", self.key, "-pubout"], check=True,
+                                     capture_output=True).stdout
+        self.app = os.path.join(self.root, "apps", "OOT-SW2SE.AppImage")
+        write(self.app, b"old app")
+        os.chmod(self.app, 0o755)
+        self.files: dict[str, bytes] = {}
+        self.release("1.2.0", b"new app")
+
+    def release(self, version: str, app: bytes, sign: bool = True) -> None:
+        asset = os.path.join(self.root, f"OOT-SW2SE-{version}-linux-x86_64.AppImage")
+        write(asset, app)
+        manifest = self.signer.manifest(version, [asset])
+        base = "https://example.invalid/releases"
+        self.files = {base + "/latest/download/update.json": manifest,
+                      base + "/latest/download/update.json.sig": self.signer.sign(manifest, self.key).encode(),
+                      f"{base}/download/v{version}/OOT-SW2SE-{version}-linux-x86_64.AppImage": app}
+        if not sign:
+            self.files[base + "/latest/download/update.json"] = manifest.replace(b'"size"', b'"size" ')
+
+    def updater(self, version: str = "1.0.2") -> host.Updater:
+        def download(url: str, limit: int) -> bytes:
+            if url not in self.files:
+                raise host.HostError("404 " + url)
+            data = self.files[url]
+            if len(data) > limit:
+                raise host.HostError("The update is larger than expected.")
+            return data
+        return host.Updater(version, self.public, ("linux-appimage", self.app), download=download,
+                            base="https://example.invalid/releases")
+
+    def test_signature_roundtrip(self) -> None:
+        der = subprocess.run(["openssl", "dgst", "-sha256", "-sign", self.key], input=b"x", capture_output=True,
+                             check=True).stdout
+        self.assertEqual(host.der_signature(self.signer.raw_signature(der)), der)
+
+    def test_check_and_install(self) -> None:
+        updater = self.updater()
+        self.assertEqual(updater.feature()["releases"], "https://example.invalid/releases")
+        self.assertEqual(updater.check()["available"], True)
+        self.assertEqual(updater.install(), {"installed": "1.2.0"})
+        with open(self.app, "rb") as file:
+            self.assertEqual(file.read(), b"new app")
+        self.assertTrue(os.stat(self.app).st_mode & 0o111, "still executable")
+        self.assertEqual(updater.restart, self.app)
+
+    def test_nothing_newer(self) -> None:
+        updater = self.updater("1.2.0")
+        self.assertFalse(updater.check()["available"])
+        with self.assertRaisesRegex(host.HostError, "already the newest"):
+            updater.install()
+
+    def test_tampered_manifest_or_file_is_refused(self) -> None:
+        self.release("1.2.0", b"new app", sign=False)
+        with self.assertRaisesRegex(host.HostError, "signature is not valid"):
+            self.updater().check()
+        self.release("1.2.0", b"new app")
+        url = next(url for url in self.files if url.endswith(".AppImage"))
+        self.files[url] = b"bad app"  # same size, other bytes
+        with self.assertRaisesRegex(host.HostError, "checksum"):
+            self.updater().install()
+        with open(self.app, "rb") as file:
+            self.assertEqual(file.read(), b"old app", "nothing was replaced")
+        other = subprocess.run(["openssl", "ecparam", "-name", "prime256v1", "-genkey", "-noout"], check=True,
+                               capture_output=True).stdout
+        other_key = os.path.join(self.root, "other.pem")
+        write(other_key, other)
+        self.public = subprocess.run(["openssl", "ec", "-in", other_key, "-pubout"], check=True, capture_output=True).stdout
+        with self.assertRaisesRegex(host.HostError, "signature is not valid"):
+            self.updater().check()
+
+    def test_off_without_key_or_target(self) -> None:
+        self.assertIsNone(host.Updater("1.0.2", None, ("linux-pyz", self.app)).feature())
+        self.assertIsNone(host.Updater("1.0.2", self.public, None).feature())
+        with self.assertRaisesRegex(host.HostError, "off"):
+            host.Updater("1.0.2", None, None).check()
+
+    def test_guides_open_only_ign_and_release_notes(self) -> None:
+        with mock.patch.object(host.webbrowser, "open") as opened:
+            self.assertTrue(host.open_guide("https://www.ign.com/wikis/ocarina-of-time-remake/All_Song_Locations"))
+            self.assertTrue(host.open_guide(host.UPDATE_RELEASES + "/tag/v1.2.0"))
+            for url in ("https://evil.example/", "file:///etc/passwd", "https://www.ign.com/wikis/other/",
+                        "https://www.ign.com/wikis/ocarina-of-time-remake/x y", None):
+                with self.assertRaises(host.HostError):
+                    host.open_guide(url)
+        time.sleep(0.1)
+        self.assertEqual(opened.call_count, 2)

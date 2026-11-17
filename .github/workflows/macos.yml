@@ -31,10 +31,7 @@ on:
       - "Program.cs"
       - "LICENSE"
       - ".github/workflows/macos.yml"
-  # Fires when a release is published (also when a draft is published), so
-  # the release already exists when the zip is attached to it.
-  release:
-    types: [published]
+  # Releases are built, signed and published by release.yml (tag push).
   workflow_dispatch:
 
 jobs:

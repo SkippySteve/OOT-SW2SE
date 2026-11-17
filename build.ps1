@@ -60,6 +60,11 @@ foreach ($component in $components.Keys) {
     Compress-Resource (Join-Path $build "$component.dll") (Join-Path $build "$component.gz")
 }
 Compress-Resource (Join-Path $source 'editor.html') (Join-Path $build 'editor.html.gz')
+# The key update manifests are signed with (update/README.md); without it, updates are off.
+$updateKey = Join-Path $source 'update\public-key.pem'
+if (Test-Path -LiteralPath $updateKey) {
+    Compress-Resource $updateKey (Join-Path $build 'update-key.pem.gz')
+}
 
 $compiler = Join-Path $env:WINDIR 'Microsoft.NET\Framework64\v4.0.30319\csc.exe'
 if (!(Test-Path -LiteralPath $compiler)) {
@@ -73,13 +78,16 @@ $compilerArgs = @(
     "/out:$exe",
     "/win32icon:$(Join-Path $source 'editor.ico')",
     "/win32manifest:$(Join-Path $source 'app.manifest')",
-    '/r:System.Windows.Forms.dll', '/r:System.Drawing.dll', '/r:System.Web.Extensions.dll',
+    '/r:System.Windows.Forms.dll', '/r:System.Drawing.dll', '/r:System.Web.Extensions.dll', '/r:System.IO.Compression.dll',
     "/r:$(Join-Path $build 'Microsoft.Web.WebView2.Core.dll')",
     "/r:$(Join-Path $build 'Microsoft.Web.WebView2.WinForms.dll')",
     "/resource:$license,WebView2-Lizenz.txt"
 )
 foreach ($resource in @('editor.html') + @($components.Keys)) {
     $compilerArgs += "/resource:$(Join-Path $build "$resource.gz"),$resource.gz"
+}
+if (Test-Path -LiteralPath (Join-Path $build 'update-key.pem.gz')) {
+    $compilerArgs += "/resource:$(Join-Path $build 'update-key.pem.gz'),update-key.pem.gz"
 }
 $compilerArgs += Join-Path $source 'Program.cs'
 & $compiler @compilerArgs

@@ -21,6 +21,7 @@
 // handles them; see BackupReader.
 
 import AppKit
+import CryptoKit
 import UniformTypeIdentifiers
 import WebKit
 
@@ -72,6 +73,122 @@ let bridgeShim = """
 })();
 """
 
+// MARK: - Updates
+
+/// Signed updates (update/README.md). Each release carries update.json, listing
+/// the files of every platform with their SHA-256, and update.json.sig: an
+/// ECDSA P-256 signature over it (SHA-256, raw r||s, base64) made in GitHub
+/// Actions with a key only the repository holds. The public key ships in the
+/// app (Resources/update-key.pem); without it, updates are off. Same scheme as
+/// the Windows and Linux hosts.
+enum Updates {
+    static let repo = "SkippySteve/OOT-SW2SE"
+    static let releases = "https://github.com/\(repo)/releases"
+    static let maxManifestBytes = 64 * 1024
+    static let maxUpdateBytes = 256 * 1024 * 1024
+    /// Guides open in the default browser, but only IGN's wiki for this game
+    /// and this app's release notes.
+    static let guidePrefixes = ["https://www.ign.com/wikis/ocarina-of-time-remake/", releases + "/"]
+
+    /// What a manifest says about this platform's file.
+    struct Release: Sendable {
+        let version: String
+        let name: String
+        let sha256: String
+        let size: Int
+    }
+
+    static func publicKeyPEM() -> String? {
+        guard let url = Bundle.main.url(forResource: "update-key", withExtension: "pem"),
+              let pem = try? String(contentsOf: url, encoding: .utf8),
+              (try? P256.Signing.PublicKey(pemRepresentation: pem)) != nil else { return nil }
+        return pem
+    }
+
+    static func parseVersion(_ value: Any?) -> [Int]? {
+        guard let text = value as? String,
+              let match = text.wholeMatch(of: /v?([0-9]{1,4})\.([0-9]{1,4})\.([0-9]{1,6})/) else { return nil }
+        return [Int(match.1)!, Int(match.2)!, Int(match.3)!]
+    }
+
+    static func isNewer(_ latest: String, than current: String) -> Bool {
+        guard let a = parseVersion(latest), let b = parseVersion(current) else { return false }
+        return b.lexicographicallyPrecedes(a)
+    }
+
+    static func isGuide(_ url: String) -> Bool {
+        url.count <= 500 && !url.contains(where: { "\"<>\\ \t\r\n".contains($0) }) && guidePrefixes.contains { url.hasPrefix($0) }
+    }
+
+    static func download(_ address: String, limit: Int) async throws -> Data {
+        guard address.hasPrefix("https://"), let url = URL(string: address) else {
+            throw HostError("Updates are only downloaded over HTTPS.")
+        }
+        var request = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 30)
+        request.setValue("OOT-SW2SE", forHTTPHeaderField: "User-Agent")
+        let (data, response) = try await URLSession.shared.data(for: request)
+        guard (response as? HTTPURLResponse)?.statusCode == 200 else { throw HostError("The update could not be downloaded.") }
+        guard data.count <= limit else { throw HostError("The update is larger than expected.") }
+        return data
+    }
+
+    /// Downloads and checks the manifest; nil release when it has no macOS file.
+    static func check(publicKeyPEM pem: String,
+                      fetch: @Sendable (String, Int) async throws -> Data = { try await download($0, limit: $1) })
+        async throws -> (version: String, release: Release?) {
+        let data = try await fetch(releases + "/latest/download/update.json", maxManifestBytes)
+        let signatureText = try await fetch(releases + "/latest/download/update.json.sig", 1024)
+        guard let key = try? P256.Signing.PublicKey(pemRepresentation: pem),
+              let raw = Data(base64Encoded: String(decoding: signatureText, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)),
+              let signature = try? P256.Signing.ECDSASignature(rawRepresentation: raw),
+              key.isValidSignature(signature, for: data) else {
+            throw HostError("The update's signature is not valid. Nothing was installed.")
+        }
+        guard let manifest = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              manifest["format"] as? Int == 1, let version = manifest["version"] as? String, parseVersion(version) != nil else {
+            throw HostError("The update manifest is malformed.")
+        }
+        guard let asset = (manifest["assets"] as? [String: Any])?["macos"] as? [String: Any] else { return (version, nil) }
+        guard let name = asset["name"] as? String, name.wholeMatch(of: /[A-Za-z0-9][A-Za-z0-9._-]{0,127}/) != nil,
+              let digest = asset["sha256"] as? String, digest.wholeMatch(of: /[0-9a-f]{64}/) != nil,
+              let size = asset["size"] as? Int, size > 0, size <= maxUpdateBytes else {
+            throw HostError("The update manifest is malformed.")
+        }
+        return (version, Release(version: version, name: name, sha256: digest, size: size))
+    }
+
+    /// Downloads and checks the new app, then puts it in place of this one.
+    /// The old app goes to the Trash-like temporary folder FileManager uses
+    /// for the swap; nothing is replaced unless every check passed.
+    static func install(_ release: Release, over app: URL) async throws {
+        let data = try await download("\(releases)/download/v\(release.version)/\(release.name)", limit: release.size)
+        let digest = SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+        guard data.count == release.size, digest == release.sha256 else {
+            throw HostError("The downloaded update does not match its checksum. Nothing was installed.")
+        }
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent("oot-sw2se-update-" + UUID().uuidString)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let zip = folder.appendingPathComponent("update.zip")
+        try data.write(to: zip)
+        let unzip = Process()
+        unzip.executableURL = URL(fileURLWithPath: "/usr/bin/ditto")
+        unzip.arguments = ["-x", "-k", zip.path, folder.appendingPathComponent("app").path]
+        try unzip.run()
+        unzip.waitUntilExit()
+        let newApp = folder.appendingPathComponent("app").appendingPathComponent("OOT SW2SE.app")
+        guard unzip.terminationStatus == 0,
+              Bundle(url: newApp)?.object(forInfoDictionaryKey: "CFBundleIdentifier") as? String == Bundle.main.bundleIdentifier else {
+            throw HostError("The update does not contain OOT SW2SE.app.")
+        }
+        do {
+            _ = try FileManager.default.replaceItemAt(app, withItemAt: newApp)
+        } catch {
+            throw HostError("\(app.deletingLastPathComponent().path) can't be written. Download the new version from \(releases).")
+        }
+    }
+}
+
 // MARK: - Errors
 
 /// Errors whose message is shown to the user by the editor page.
@@ -86,6 +203,46 @@ struct HostError: LocalizedError {
 /// Reads save files from a folder chosen by the user. Based on
 /// `EditorWindow.ReadBackup` in Program.cs, with the extra layouts and checks
 /// described on `read(folder:)` and `readFile`.
+/// PC ports of the game keep the same save files as the Switch, in one folder
+/// per profile: Longshot in %APPDATA%\Longshot\save\<user id> on Windows and
+/// ~/.local/share/longshot/save/<user id> on Linux, Project ReLink in
+/// <game folder>\user\save\<user id> on Windows and
+/// ~/.local/share/relink/save/<user id> on Linux. When the picked folder holds
+/// no save itself, the profile folder is looked for in it, in save and in
+/// user/save. Same rules as the Windows and Linux hosts.
+enum PortSaves {
+    /// The one profile both ports open (their nn_applet user id).
+    static let gameUser = "5a3c9e1f0b7d24680000000000000001"
+
+    /// The profile folder to open for `folder`, or nil when `folder` holds a
+    /// save itself or no profile folder is found.
+    /// - Throws: `HostError` when several profiles hold saves and none is the
+    ///   one the ports open.
+    static func profileFolder(_ folder: URL) throws -> URL? {
+        if holdsSlots(folder) || holdsSlots(folder.appendingPathComponent("files")) { return nil }
+        let candidates = [folder, folder.appendingPathComponent("save"),
+                          folder.appendingPathComponent("user").appendingPathComponent("save")]
+        for saves in candidates {
+            let children = (try? FileManager.default.contentsOfDirectory(at: saves, includingPropertiesForKeys: nil)) ?? []
+            let profiles = children.filter(holdsSlots).sorted { $0.lastPathComponent < $1.lastPathComponent }
+            if profiles.isEmpty { continue }
+            if profiles.count == 1 { return profiles[0] }
+            if let game = profiles.first(where: { $0.lastPathComponent.lowercased() == gameUser }) { return game }
+            throw HostError("This folder holds the saves of several profiles. Open one of them: " +
+                            profiles.map(\.lastPathComponent).joined(separator: ", ") + ".")
+        }
+        return nil
+    }
+
+    private static func holdsSlots(_ folder: URL) -> Bool {
+        (0..<HostLimits.slotCount).contains { index in
+            let slot = folder.appendingPathComponent(String(format: "slot_%02d", index))
+            return FileManager.default.fileExists(atPath: slot.appendingPathComponent("progress.sav").path)
+                && FileManager.default.fileExists(atPath: slot.appendingPathComponent("caption.sav").path)
+        }
+    }
+}
+
 enum BackupReader {
     /// One file sent to the page: a virtual relative path plus base64 contents.
     typealias Entry = [String: String]
@@ -104,8 +261,11 @@ enum BackupReader {
     ///   2. Any other folder that directly holds progress.sav + caption.sav
     ///      (one loose save), optionally with option.sav next to them.
     ///   3. A backup folder with slot_00...slot_05 subfolders, either directly
-    ///      or inside a "files" subfolder, plus optional option.sav and
-    ///      manifest.json. Picking the "files" folder itself works too.
+    ///      or inside a "files" subfolder, plus optional option.sav,
+    ///      account.sav and manifest.json. Picking the "files" folder itself
+    ///      works too.
+    ///   4. A PC port's game or data folder, or its save folder: the profile
+    ///      folder inside it is read like 3 (see `PortSaves`).
     /// - Throws: `HostError` when no save pair is found or limits are exceeded.
     static func read(folder: URL) throws -> [Entry] {
         var files: [Entry] = []
@@ -126,17 +286,20 @@ enum BackupReader {
                 name = "Save"
             }
             try readPair(into: &files, folder: folder, prefix: name + "/", total: &totalBytes)
-            let localOption = folder.appendingPathComponent("option.sav")
-            if exists(localOption) {
-                try readFile(into: &files, url: localOption, relativePath: name + "/option.sav", total: &totalBytes)
+            for extra in ["option.sav", "account.sav"] where exists(folder.appendingPathComponent(extra)) {
+                try readFile(into: &files, url: folder.appendingPathComponent(extra), relativePath: name + "/" + extra,
+                             total: &totalBytes)
             }
             return files
         }
 
+        // A PC port's game or data folder: open the save folder inside it.
+        let saveFolder = try PortSaves.profileFolder(folder) ?? folder
+
         // Prefer a "files" subfolder, but only if it really holds slots: an
         // empty or unrelated "files" folder must not hide slots at the root.
-        let nested = folder.appendingPathComponent("files")
-        let slotsFolder = isDirectory(nested) && !slotFolders(in: nested).isEmpty ? nested : folder
+        let nested = saveFolder.appendingPathComponent("files")
+        let slotsFolder = isDirectory(nested) && !slotFolders(in: nested).isEmpty ? nested : saveFolder
         let slots = slotFolders(in: slotsFolder)
         if slots.isEmpty {
             throw HostError("No folder containing progress.sav and caption.sav was found.")
@@ -168,14 +331,14 @@ enum BackupReader {
         return lower
     }
 
-    /// Adds the backup-wide files that sit around the slots: option.sav next
-    /// to the slot folders, and manifest.json in the backup root, which is the
-    /// parent of a folder named "files" (so picking "files" itself still
-    /// finds the manifest and keeps it in sync with the patch).
+    /// Adds the backup-wide files that sit around the slots: option.sav and
+    /// account.sav next to the slot folders, and manifest.json in the backup
+    /// root, which is the parent of a folder named "files" (so picking "files"
+    /// itself still finds the manifest and keeps it in sync with the patch).
     private static func readExtras(into files: inout [Entry], slotsFolder: URL, total: inout Int) throws {
-        let option = slotsFolder.appendingPathComponent("option.sav")
-        if exists(option) {
-            try readFile(into: &files, url: option, relativePath: backupPrefix + "option.sav", total: &total)
+        for extra in ["option.sav", "account.sav"] where exists(slotsFolder.appendingPathComponent(extra)) {
+            try readFile(into: &files, url: slotsFolder.appendingPathComponent(extra), relativePath: backupPrefix + extra,
+                         total: &total)
         }
         let root = slotsFolder.lastPathComponent.lowercased() == "files"
             ? slotsFolder.deletingLastPathComponent() : slotsFolder
@@ -435,6 +598,11 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate,
         let configuration = WKWebViewConfiguration()
         let controller = WKUserContentController()
         controller.addUserScript(WKUserScript(source: bridgeShim, injectionTime: .atDocumentStart, forMainFrameOnly: true))
+        // Tells the page what this host offers beyond the three requests.
+        let auto = ProcessInfo.processInfo.environment["OOT_SW2SE_NO_UPDATE_CHECK"] != "1"
+        let features = updateKey == nil ? "{}" : "{\"updates\":{\"auto\":\(auto),\"releases\":\"\(Updates.releases)\"}}"
+        controller.addUserScript(WKUserScript(source: "window.chrome.webview.hostFeatures = \(features);",
+                                              injectionTime: .atDocumentStart, forMainFrameOnly: true))
         controller.add(WeakScriptMessageHandler(self), name: "host")
         configuration.userContentController = controller
         // The editor is fully offline; keep nothing on disk between launches.
@@ -555,6 +723,17 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate,
             saveFolder(entries: request["files"] as? [[String: String]], name: request["name"] as? String, completion: finish)
         case "savePatch":
             savePatch(name: request["name"] as? String, contents: request["contents"] as? String, completion: finish)
+        case "openUrl":
+            if let url = request["url"] as? String, Updates.isGuide(url), let address = URL(string: url) {
+                NSWorkspace.shared.open(address)
+                finish(true, nil)
+            } else {
+                finish(nil, HostError("Only IGN's Ocarina of Time Remake guides can be opened."))
+            }
+        case "checkUpdate":
+            checkUpdate(completion: finish)
+        case "installUpdate":
+            installUpdate(completion: finish)
         default:
             finish(nil, HostError("Unknown editor action."))
         }
@@ -569,6 +748,43 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate,
     }
 
     // MARK: Host actions
+
+    private let updateKey = Updates.publicKeyPEM()
+    private var pendingRelease: Updates.Release?
+
+    private func checkUpdate(completion: @escaping Completion) {
+        guard let key = updateKey else { return completion(nil, HostError("Updates are off for this copy of the app.")) }
+        Task { @MainActor in
+            do {
+                let (latest, release) = try await Updates.check(publicKeyPEM: key)
+                let newer = Updates.isNewer(latest, than: editorVersion)
+                self.pendingRelease = newer ? release : nil
+                completion(["current": editorVersion, "latest": latest, "available": newer && release != nil,
+                            "notes": "\(Updates.releases)/tag/v\(latest)"], nil)
+            } catch {
+                completion(nil, error)
+            }
+        }
+    }
+
+    private func installUpdate(completion: @escaping Completion) {
+        guard let release = pendingRelease else { return completion(nil, HostError("Check for updates first.")) }
+        let app = Bundle.main.bundleURL
+        Task { @MainActor in
+            do {
+                try await Updates.install(release, over: app)
+                completion(true, nil)
+                // Reopen the new app once this one has quit.
+                let relaunch = Process()
+                relaunch.executableURL = URL(fileURLWithPath: "/bin/sh")
+                relaunch.arguments = ["-c", "sleep 1; /usr/bin/open -n \"$0\"", app.path]
+                try? relaunch.run()
+                NSApp.terminate(nil)
+            } catch {
+                completion(nil, error)
+            }
+        }
+    }
 
     /// Asks for a backup or save folder, then reads it off the main thread.
     /// Completes with `nil` when the user cancels.

@@ -1,0 +1,191 @@
+# release.yml
+#
+# Builds, signs and publishes a release when a version tag is pushed:
+#
+#   git tag v2.0.0 && git push origin v2.0.0
+#
+# The tag must match the version in Program.cs. Every platform is built from
+# the same commit, then the publish job writes update.json (each file's size
+# and SHA-256) and signs it with the UPDATE_SIGNING_KEY secret
+# (update/README.md). The apps install an update only when that signature and
+# the file's checksum match, so the release files must not be replaced later.
+# The web image is pushed by web.yml for the same tag.
+
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  version:
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Check the tag against Program.cs
+        id: version
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          version="$(sed -nE 's/.*AssemblyVersion\("([0-9]+\.[0-9]+\.[0-9]+).*/\1/p' Program.cs)"
+          if [[ "v$version" != "$TAG" ]]; then
+            echo "error: tag $TAG does not match AssemblyVersion $version in Program.cs" >&2
+            exit 1
+          fi
+          if [[ ! -f update/public-key.pem ]]; then
+            echo "error: update/public-key.pem is missing; see update/README.md" >&2
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+  windows:
+    needs: version
+    runs-on: windows-2025
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Build
+        shell: pwsh
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          .\build.ps1
+          Compress-Archive -Path dist\* -DestinationPath "OOT-SW2SE-$env:VERSION-Windows-x64.zip"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: windows
+          path: OOT-SW2SE-*-Windows-x64.zip
+          if-no-files-found: error
+
+  macos:
+    needs: version
+    runs-on: macos-26
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Build
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          macos/build.sh
+          ditto -c -k --keepParent "macos/dist/OOT SW2SE.app" "OOT-SW2SE-$VERSION-macOS.zip"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: macos
+          path: OOT-SW2SE-*-macOS.zip
+          if-no-files-found: error
+
+  linux:
+    needs: version
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Test the host
+        run: python3 -m unittest discover -s linux/tests
+      # Same pinned tools as linux.yml.
+      - name: Get appimagetool and the AppImage runtime
+        env:
+          TOOL_URL: https://github.com/AppImage/appimagetool/releases/download/1.9.1/appimagetool-x86_64.AppImage
+          TOOL_SHA256: ed4ce84f0d9caff66f50bcca6ff6f35aae54ce8135408b3fa33abfc3cb384eb0
+          RUNTIME_URL: https://github.com/AppImage/type2-runtime/releases/download/20251108/runtime-x86_64
+          RUNTIME_SHA256: 2fca8b443c92510f1483a883f60061ad09b46b978b2631c807cd873a47ec260d
+        run: |
+          tools="$RUNNER_TEMP/appimage"
+          mkdir -p "$tools"
+          curl -fsSL --retry 3 -o "$tools/appimagetool" "$TOOL_URL"
+          curl -fsSL --retry 3 -o "$tools/runtime" "$RUNTIME_URL"
+          printf '%s  %s\n' "$TOOL_SHA256" "$tools/appimagetool" "$RUNTIME_SHA256" "$tools/runtime" | sha256sum -c -
+          chmod 755 "$tools/appimagetool"
+      - name: Build
+        env:
+          APPIMAGE_EXTRACT_AND_RUN: "1"
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          APPIMAGETOOL="$RUNNER_TEMP/appimage/appimagetool" APPIMAGE_RUNTIME="$RUNNER_TEMP/appimage/runtime" \
+            linux/build.sh --appimage
+          mv linux/dist/oot-sw2se.pyz "OOT-SW2SE-$VERSION-linux.pyz"
+          mv "linux/dist/OOT_SW2SE-$VERSION-x86_64.AppImage" "OOT-SW2SE-$VERSION-linux-x86_64.AppImage"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: linux
+          path: OOT-SW2SE-*-linux*
+          if-no-files-found: error
+
+  web:
+    needs: version
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Build and test the page
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          node --test tests/editor.test.cjs tests/web-host.test.cjs
+          node web/build.mjs
+          (cd web/dist && zip -X -9 "$GITHUB_WORKSPACE/OOT-SW2SE-$VERSION-web.zip" index.html favicon.ico LICENSE.txt)
+      - uses: actions/upload-artifact@v7
+        with:
+          name: web
+          path: OOT-SW2SE-*-web.zip
+          if-no-files-found: error
+
+  publish:
+    needs: [version, windows, macos, linux, web]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    environment: release
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@v7
+        with:
+          path: release
+          merge-multiple: true
+      - name: Sign the update manifest
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+          UPDATE_SIGNING_KEY: ${{ secrets.UPDATE_SIGNING_KEY }}
+        run: |
+          if [[ -z "$UPDATE_SIGNING_KEY" ]]; then
+            echo "error: the UPDATE_SIGNING_KEY secret is not set; see update/README.md" >&2
+            exit 1
+          fi
+          key="$RUNNER_TEMP/update-key.pem"
+          (umask 077 && printf '%s\n' "$UPDATE_SIGNING_KEY" > "$key")
+          python3 update/sign_manifest.py --version "$VERSION" --key "$key" --out release release/OOT-SW2SE-*
+          rm -f "$key"
+          # The signature must check out with the public key the apps carry.
+          python3 - <<'PY'
+          import base64, subprocess, sys
+          sys.path.insert(0, "linux")
+          import oot_sw2se
+          data = open("release/update.json", "rb").read()
+          oot_sw2se.verify_signature(data, open("release/update.json.sig").read(), open("update/public-key.pem", "rb").read())
+          print("update.json signature verified with update/public-key.pem")
+          PY
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          gh release create "$TAG" release/* --repo "$GITHUB_REPOSITORY" --title "OOT SW2SE ${TAG#v}" --generate-notes --verify-tag

@@ -59,6 +59,7 @@ import tempfile
 import threading
 import time
 import urllib.parse
+import urllib.request
 import uuid
 import webbrowser
 import zipfile
@@ -210,8 +211,11 @@ class BackupReader:
       2. Any other folder that directly holds progress.sav + caption.sav (one
          loose save), optionally with option.sav next to them.
       3. A backup folder with slot_00 ... slot_05 subfolders, either directly
-         or inside a "files" subfolder, plus optional option.sav and
-         manifest.json. Picking the "files" folder itself works too.
+         or inside a "files" subfolder, plus optional option.sav,
+         account.sav and manifest.json. Picking the "files" folder itself
+         works too.
+      4. A PC port's game or data folder, or its save folder: the profile
+         folder inside it is read like 3 (see port_profile_folder).
     """
 
     def __init__(self) -> None:
@@ -245,10 +249,13 @@ class BackupReader:
             if not name.strip() or any(char in name for char in "/\\:"):
                 name = "Save"
             self._read_pair(folder, name + "/")
-            option = os.path.join(folder, "option.sav")
-            if is_regular_file(option):
-                self._read_file(option, name + "/option.sav")
+            for extra in ("option.sav", "account.sav"):
+                if is_regular_file(os.path.join(folder, extra)):
+                    self._read_file(os.path.join(folder, extra), name + "/" + extra)
             return
+
+        # A PC port's game or data folder: open the save folder inside it.
+        folder = port_profile_folder(folder) or folder
 
         # Prefer a "files" subfolder, but only if it really holds slots: an
         # empty or unrelated "files" folder must not hide slots at the root.
@@ -262,11 +269,11 @@ class BackupReader:
         self._read_extras(slots_folder)
 
     def _read_extras(self, slots_folder: str) -> None:
-        """Adds option.sav next to the slots and manifest.json in the backup
-        root, the parent of a folder named "files"."""
-        option = os.path.join(slots_folder, "option.sav")
-        if is_regular_file(option):
-            self._read_file(option, BACKUP_PREFIX + "option.sav")
+        """Adds option.sav and account.sav next to the slots and manifest.json
+        in the backup root, the parent of a folder named "files"."""
+        for extra in ("option.sav", "account.sav"):
+            if is_regular_file(os.path.join(slots_folder, extra)):
+                self._read_file(os.path.join(slots_folder, extra), BACKUP_PREFIX + extra)
         root = os.path.dirname(slots_folder) if os.path.basename(slots_folder).lower() == "files" else slots_folder
         manifest = os.path.join(root, "manifest.json")
         if is_regular_file(manifest):
@@ -332,6 +339,41 @@ def slot_folders(folder: str) -> list[tuple[str, str]]:
         if has_save_pair(path):
             result.append((slot, path))
     return result
+
+
+# The one profile Longshot and Project ReLink open (their nn_applet user id).
+PORT_GAME_USER = "5a3c9e1f0b7d24680000000000000001"
+
+
+def port_profile_folder(folder: str) -> str | None:
+    """The save folder of a PC port inside `folder`, or None.
+
+    PC ports of the game keep the same save files as the Switch, in one folder
+    per profile: Longshot in ~/.local/share/longshot/save/<user id> (Windows:
+    %APPDATA%\\Longshot\\save\\<user id>), Project ReLink in
+    ~/.local/share/relink/save/<user id> (Windows: <game folder>\\user\\save\\<user id>).
+    When `folder` holds no save itself, the profile folder is looked for in it,
+    in save/ and in user/save/. Same rules as PortSaves in Program.cs and
+    OOTSW2SE.swift.
+    """
+    if slot_folders(folder) or slot_folders(os.path.join(folder, "files")):
+        return None
+    for saves in (folder, os.path.join(folder, "save"), os.path.join(folder, "user", "save")):
+        try:
+            names = sorted(os.listdir(saves))
+        except OSError:
+            continue
+        profiles = [name for name in names if slot_folders(os.path.join(saves, name))]
+        if not profiles:
+            continue
+        if len(profiles) == 1:
+            return os.path.join(saves, profiles[0])
+        for name in profiles:
+            if name.lower() == PORT_GAME_USER:
+                return os.path.join(saves, name)
+        raise HostError("This folder holds the saves of several profiles. Open one of them: "
+                        + ", ".join(profiles) + ".")
+    return None
 
 
 def has_save_pair(folder: str) -> bool:
@@ -728,9 +770,10 @@ def write_backup_archive(folder: str, sources: dict[str, tuple[str, str]],
 class EditorHost:
     """Answers the page's requests, like HandleMessage in Program.cs."""
 
-    def __init__(self, dialogs: Dialogs, settings: Settings | None = None) -> None:
+    def __init__(self, dialogs: Dialogs, settings: Settings | None = None, updater: Updater | None = None) -> None:
         self.dialogs = dialogs
         self.settings = settings
+        self.updater = updater
         # Guards against overlapping dialogs, like dialogOpen in Program.cs.
         self._dialog = threading.Lock()
         # Dialogs start in the folders used last, also from earlier runs.
@@ -741,6 +784,11 @@ class EditorHost:
 
     def handle(self, message: dict) -> dict:
         """Runs one request and returns {result, error} for the page."""
+        if message.get("action") == "openUrl":
+            try:
+                return {"result": open_guide(message.get("url")), "error": None}
+            except HostError as error:
+                return {"result": None, "error": str(error)}
         if not self._dialog.acquire(blocking=False):
             return {"result": None, "error": "A file dialog is already open."}
         try:
@@ -753,6 +801,10 @@ class EditorHost:
                 result = self.save_folder(message)
             elif action == "saveBack":
                 result = self.save_back(message)
+            elif action == "checkUpdate" and self.updater:
+                result = self.updater.check()
+            elif action == "installUpdate" and self.updater:
+                result = self.updater.install()
             else:
                 raise HostError("Unknown editor action.")
             return {"result": result, "error": None}
@@ -956,6 +1008,172 @@ class Lifetime:
             if now - self._empty_since >= self.close_grace:
                 return "The editor tab was closed."
             return None
+
+
+# MARK: - Updates
+
+# Releases come from this repository. Each one carries update.json, listing
+# the files of every platform with their SHA-256, and update.json.sig: an
+# ECDSA P-256 signature over it (SHA-256, raw r||s, base64), made in GitHub
+# Actions with a key only the repository holds. The public key ships with the
+# app (update/public-key.pem); without it, updates are off. Same scheme as
+# the Windows and macOS hosts.
+UPDATE_REPO = "SkippySteve/OOT-SW2SE"
+UPDATE_RELEASES = f"https://github.com/{UPDATE_REPO}/releases"
+MAX_MANIFEST_BYTES = 64 * 1024
+MAX_UPDATE_BYTES = 256 * 1024 * 1024
+ASSET_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
+
+
+def parse_version(text: object) -> tuple[int, int, int] | None:
+    match = re.fullmatch(r"v?([0-9]{1,4})\.([0-9]{1,4})\.([0-9]{1,6})", text) if isinstance(text, str) else None
+    return tuple(int(part) for part in match.groups()) if match else None  # type: ignore[return-value]
+
+
+def der_signature(raw: bytes) -> bytes:
+    """Turns a raw r||s P-256 signature into the DER form openssl reads."""
+    if len(raw) != 64:
+        raise HostError("The update signature is malformed.")
+    def integer(value: bytes) -> bytes:
+        value = value.lstrip(b"\0") or b"\0"
+        if value[0] & 0x80:
+            value = b"\0" + value
+        return b"\x02" + bytes([len(value)]) + value
+    body = integer(raw[:32]) + integer(raw[32:])
+    return b"\x30" + bytes([len(body)]) + body
+
+
+def verify_signature(data: bytes, signature: str, public_key: bytes, openssl: str = "openssl") -> None:
+    """Checks the manifest's signature with the openssl command; raises HostError."""
+    try:
+        raw = base64.b64decode(signature.strip(), validate=True)
+    except (binascii.Error, ValueError):
+        raise HostError("The update signature is malformed.") from None
+    der = der_signature(raw)
+    with tempfile.TemporaryDirectory(prefix="oot-sw2se-update-") as folder:
+        paths = {name: os.path.join(folder, name) for name in ("key.pem", "sig.der", "update.json")}
+        for name, content in (("key.pem", public_key), ("sig.der", der), ("update.json", data)):
+            with open(paths[name], "wb") as file:
+                file.write(content)
+        try:
+            checked = subprocess.run([openssl, "dgst", "-sha256", "-verify", paths["key.pem"], "-signature",
+                                      paths["sig.der"], paths["update.json"]], stdin=subprocess.DEVNULL,
+                                     capture_output=True, timeout=30)
+        except (OSError, subprocess.SubprocessError):
+            raise HostError("Updates need the openssl command to check signatures. Install openssl, "
+                            f"or download the new version from {UPDATE_RELEASES}.") from None
+    if checked.returncode != 0:
+        raise HostError("The update's signature is not valid. Nothing was installed.")
+
+
+def fetch(url: str, limit: int) -> bytes:
+    """Downloads `url` over HTTPS, refusing more than `limit` bytes."""
+    if not url.startswith("https://"):
+        raise HostError("Updates are only downloaded over HTTPS.")
+    request = urllib.request.Request(url, headers={"User-Agent": "OOT-SW2SE"})
+    try:
+        with urllib.request.urlopen(request, timeout=30) as response:
+            data = response.read(limit + 1)
+    except OSError as error:
+        raise HostError(f"The update could not be downloaded: {error}") from None
+    if len(data) > limit:
+        raise HostError("The update is larger than expected.")
+    return data
+
+
+def update_target() -> tuple[str, str] | None:
+    """What this copy of the app is, and the file an update replaces."""
+    appimage = os.environ.get("APPIMAGE")
+    if appimage and os.path.isfile(appimage):
+        return "linux-appimage", appimage
+    program = os.path.abspath(sys.argv[0]) if sys.argv and sys.argv[0] else ""
+    if program.endswith(".pyz") and os.path.isfile(program):
+        return "linux-pyz", program
+    return None
+
+
+def public_update_key() -> bytes | None:
+    """The key update manifests are signed with: bundled by build.sh, or from the checkout."""
+    key = _bundled("update-key.pem")
+    if key is None:
+        key = _repository(os.path.join("update", "public-key.pem"))
+    return key if key and b"BEGIN PUBLIC KEY" in key else None
+
+
+# Guides open in the default browser, but only IGN's wiki for this game and
+# this app's release notes.
+GUIDE_PREFIXES = ("https://www.ign.com/wikis/ocarina-of-time-remake/", UPDATE_RELEASES + "/")
+
+
+def open_guide(url: object) -> bool:
+    if not isinstance(url, str) or len(url) > 500 or not url.startswith(GUIDE_PREFIXES) or \
+            any(char in url for char in "\"<>\\ \t\r\n"):
+        raise HostError("Only IGN's Ocarina of Time Remake guides can be opened.")
+    threading.Thread(target=webbrowser.open, args=(url,), daemon=True).start()
+    return True
+
+
+class Updater:
+    """Checks for and installs a newer release (Linux AppImage or .pyz)."""
+
+    def __init__(self, version: str, public_key: bytes | None, target: tuple[str, str] | None,
+                 download=fetch, openssl: str = "openssl", base: str = UPDATE_RELEASES) -> None:
+        self.version = version
+        self.public_key = public_key
+        self.target = target
+        self.download = download
+        self.openssl = openssl
+        self.base = base
+        self.manifest: dict | None = None
+        self.restart: str | None = None  # the file to start after an installed update
+
+    def feature(self) -> dict | None:
+        """What the page is told: None when updates are off for this copy."""
+        if not self.public_key or not self.target:
+            return None
+        return {"auto": os.environ.get("OOT_SW2SE_NO_UPDATE_CHECK") != "1", "releases": self.base}
+
+    def check(self) -> dict:
+        if not self.feature():
+            raise HostError("Updates are off for this copy of the app.")
+        data = self.download(self.base + "/latest/download/update.json", MAX_MANIFEST_BYTES)
+        signature = self.download(self.base + "/latest/download/update.json.sig", 1024).decode("ascii", "replace")
+        verify_signature(data, signature, self.public_key, self.openssl)  # type: ignore[arg-type]
+        try:
+            manifest = json.loads(data)
+        except ValueError:
+            raise HostError("The update manifest is malformed.") from None
+        latest = parse_version(manifest.get("version")) if isinstance(manifest, dict) else None
+        current = parse_version(self.version)
+        if not latest or not current or manifest.get("format") != 1:
+            raise HostError("The update manifest is malformed.")
+        asset = (manifest.get("assets") or {}).get(self.target[0]) if isinstance(manifest.get("assets"), dict) else None  # type: ignore[index]
+        self.manifest = manifest
+        return {"current": self.version, "latest": manifest["version"], "available": latest > current and bool(asset),
+                "notes": f"{self.base}/tag/v{manifest['version']}"}
+
+    def install(self) -> dict:
+        if not self.manifest:
+            self.check()
+        manifest = self.manifest or {}
+        if parse_version(manifest.get("version")) <= parse_version(self.version):  # type: ignore[operator]
+            raise HostError("This is already the newest version.")
+        kind, path = self.target  # type: ignore[misc]
+        asset = manifest["assets"].get(kind)
+        name, digest, size = (asset or {}).get("name"), (asset or {}).get("sha256"), (asset or {}).get("size")
+        if not isinstance(name, str) or not ASSET_NAME.fullmatch(name) or not isinstance(digest, str) or \
+                not re.fullmatch(r"[0-9a-f]{64}", digest) or not isinstance(size, int) or not 0 < size <= MAX_UPDATE_BYTES:
+            raise HostError("The update manifest is malformed.")
+        data = self.download(f"{self.base}/download/v{manifest['version']}/{name}", size)
+        if len(data) != size or not hmac.compare_digest(hashlib.sha256(data).hexdigest(), digest):
+            raise HostError("The downloaded update does not match its checksum. Nothing was installed.")
+        folder = os.path.dirname(path)
+        if not os.access(folder, os.W_OK):
+            raise HostError(f"{folder} can't be written. Download the new version from {self.base}.")
+        mode = stat.S_IMODE(os.stat(path).st_mode) | 0o111
+        write_file_atomically(path, data, mode)
+        self.restart = path
+        return {"installed": manifest["version"]}
 
 
 # MARK: - Page
@@ -1487,13 +1705,16 @@ def main(argv: list[str] | None = None) -> int:
             return uninstall()
         settings = Settings()
         features = {"saveBack": {"backupFolder": settings.backup_folder(create=False)}}
+        updater = Updater(editor_version(), public_update_key(), update_target())
+        if updater.feature():
+            features["updates"] = updater.feature()
         page = build_page(resource("editor.html").decode("utf-8"), editor_version(), features)
     except HostError as error:
         print(f"error: {error}", file=sys.stderr)
         return 1
 
     lifetime = Lifetime(time.monotonic(), launch_timeout=None if args.no_browser else 120.0)
-    server = EditorServer(EditorHost(Dialogs(), settings), lifetime, page, verbose=args.verbose)
+    server = EditorServer(EditorHost(Dialogs(), settings, updater), lifetime, page, verbose=args.verbose)
     thread = threading.Thread(target=server.serve_forever, name="http", daemon=True)
     thread.start()
     print(f"{APP_NAME} is running. Open this address once, in your browser:\n  {server.launch_url}\n"
@@ -1537,6 +1758,9 @@ def main(argv: list[str] | None = None) -> int:
                 # the window over to another process; the heartbeats tell
                 # when it is closed.
                 window = None
+            if updater.restart:
+                print("Update installed. Restarting.", flush=True)
+                break
             reason = lifetime.exit_reason(time.monotonic())
             if reason:
                 print(reason + " Exiting.", flush=True)
@@ -1550,6 +1774,9 @@ def main(argv: list[str] | None = None) -> int:
         server.server_close()
         if server.track_window and server.window:
             settings.update(window=remembered_window(settings.values.get("window"), server.window))
+    if updater.restart:
+        # The new version starts on its own; this one has closed its window.
+        subprocess.Popen([updater.restart], start_new_session=True, stdin=subprocess.DEVNULL)
     return 0
 
 

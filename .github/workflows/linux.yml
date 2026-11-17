@@ -36,8 +36,7 @@ on:
       - "Program.cs"
       - "LICENSE"
       - ".github/workflows/linux.yml"
-  release:
-    types: [published]
+  # Releases are built, signed and published by release.yml (tag push).
   workflow_dispatch:
 
 jobs:
