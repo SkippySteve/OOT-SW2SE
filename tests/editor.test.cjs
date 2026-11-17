@@ -254,7 +254,8 @@ test('every checklist objective links a guide page, and walkthrough chapters tra
   assert.deepEqual(done.slice(0, 6), [true, true, false, null, false, false]);
   assert.equal(areaName('DodongoCavern'), 'Dodongo Cavern');
   assert.equal(areaName('LostWood'), 'Lost Woods');
-  assert.equal(areaName('HyruleField_Child'), 'Hyrule Field Child');
+  assert.equal(areaName('HyruleField_Child'), 'Hyrule Field (child)');
+  assert.equal(areaName('KakarikoVillage_Adult'), 'Kakariko Village (adult)');
 });
 
 test('save time is read from caption.sav to the second and shown as day.month.year', () => {

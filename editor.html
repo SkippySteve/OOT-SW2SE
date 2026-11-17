@@ -262,7 +262,7 @@ dd { margin: 0; overflow-wrap: anywhere; }
       <div class="load-head">
         <div>
           <h3>Saves folder</h3>
-          <p class="muted small">A backup, a single save folder, or the game or data folder of Longshot or Project ReLink.</p>
+          <p class="muted small">A backup, a single save folder, or the data or game folder of Longshot, Project ReLink, Lichii or Fritchii.</p>
         </div>
         <button class="primary" id="folder" type="button">Choose Folder…</button>
       </div>
@@ -1373,6 +1373,9 @@ const areaNames = { LostWood: "Lost Woods", HountedWasteland: "Haunted Wasteland
   GraveYard: "Graveyard", GerudoTrainingGround: "Gerudo Training Ground", InsideGanonCastle: "Inside Ganon's Castle" };
 function areaName(id) {
   if (!id) return '';
+  // "KakarikoVillage_Child": the same place in Link's other era.
+  const era = /^(.*)_(Child|Adult)$/.exec(id);
+  if (era) return areaName(era[1]) + ' (' + era[2].toLowerCase() + ')';
   return areaNames[id] ?? id.replace(/_/g, ' ').replace(/([a-z])([A-Z])/g, '$1 $2').replace(/([A-Z])([A-Z][a-z])/g, '$1 $2');
 }
 
