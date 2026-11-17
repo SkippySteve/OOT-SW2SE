@@ -53,16 +53,21 @@ public key. Apps that missed it need a manual download once.
 
 ## Making a release
 
-1. Set the version in `Program.cs` (`AssemblyVersion` and
-   `AssemblyFileVersion`), commit, and merge.
-2. Tag the merged commit and push the tag: `git tag v2.0.1 && git push origin v2.0.1`.
-3. [`release.yml`](../.github/workflows/release.yml) checks the tag against
-   `Program.cs`, builds Windows, macOS, Linux and the web page from that
-   commit, writes and signs `update.json`
+1. Set the new version in `Program.cs` (`AssemblyVersion` and
+   `AssemblyFileVersion`, for example `2.0.2.0`) in a pull request, and merge
+   it.
+2. That's all: [`release.yml`](../.github/workflows/release.yml) sees the new
+   version on `main`. It builds Windows, macOS, Linux (AppImage and `.pyz`)
+   and the web page from that commit, writes and signs `update.json`
    ([`sign_manifest.py`](sign_manifest.py)), checks the signature with
-   `public-key.pem`, and publishes the release with every file.
-   [`web.yml`](../.github/workflows/web.yml) pushes the container image for the
-   same tag.
+   `public-key.pem`, and publishes the release **OOT SW2SE 2.0.2** with the
+   tag `v2.0.2` and every file. It then starts
+   [`web.yml`](../.github/workflows/web.yml) for that tag, which pushes the
+   container image.
+
+Pushing a version tag by hand (`git tag v2.0.2 && git push origin v2.0.2`)
+works too; the tag must match `Program.cs`. A change to `Program.cs` that keeps
+the version doesn't release anything.
 
 Don't replace release files afterwards: the apps would refuse them, since
 their checksums are signed.

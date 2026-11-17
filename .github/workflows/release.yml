@@ -1,10 +1,14 @@
 # release.yml
 #
-# Builds, signs and publishes a release when a version tag is pushed:
+# Builds, signs and publishes a release, named after its version
+# ("OOT SW2SE 2.0.1", tag v2.0.1), in either of two ways:
 #
-#   git tag v2.0.0 && git push origin v2.0.0
-#
-# The tag must match the version in Program.cs. Every platform is built from
+#   - Merge a change to the version in Program.cs (AssemblyVersion) into
+#     main. If no release has that version's tag yet, this workflow makes the
+#     release and the tag, on the merged commit.
+#   - Or push a version tag by hand: git tag v2.0.1 && git push origin v2.0.1.
+#     The tag must match the version in Program.cs.
+# Every platform is built from
 # the same commit, then the publish job writes update.json (each file's size
 # and SHA-256) and signs it with the UPDATE_SIGNING_KEY secret
 # (update/README.md). The apps install an update only when that signature and
@@ -15,38 +19,62 @@ name: Release
 
 on:
   push:
+    branches: [main]
     tags: ["v*"]
+    # (Path filters don't apply to tag pushes.)
+    paths: ["Program.cs"]
 
 permissions:
   contents: read
+
+# One release at a time; a second push waits instead of racing the first.
+concurrency:
+  group: release
+  cancel-in-progress: false
 
 jobs:
   version:
     runs-on: ubuntu-24.04
     outputs:
       version: ${{ steps.version.outputs.version }}
+      release: ${{ steps.version.outputs.release }}
     steps:
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
-      - name: Check the tag against Program.cs
+      - name: Read the version and decide whether to release
         id: version
         env:
+          GH_TOKEN: ${{ github.token }}
+          REF_TYPE: ${{ github.ref_type }}
           TAG: ${{ github.ref_name }}
         run: |
           version="$(sed -nE 's/.*AssemblyVersion\("([0-9]+\.[0-9]+\.[0-9]+).*/\1/p' Program.cs)"
-          if [[ "v$version" != "$TAG" ]]; then
-            echo "error: tag $TAG does not match AssemblyVersion $version in Program.cs" >&2
+          if [[ -z "$version" ]]; then
+            echo "error: no AssemblyVersion in Program.cs" >&2
             exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          if [[ "$REF_TYPE" == "tag" ]]; then
+            if [[ "v$version" != "$TAG" ]]; then
+              echo "error: tag $TAG does not match AssemblyVersion $version in Program.cs" >&2
+              exit 1
+            fi
+          elif gh release view "v$version" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            # A change to Program.cs that keeps the version: nothing to release.
+            echo "Release v$version exists already; nothing to do."
+            echo "release=false" >> "$GITHUB_OUTPUT"
+            exit 0
           fi
           if [[ ! -f update/public-key.pem ]]; then
             echo "error: update/public-key.pem is missing; see update/README.md" >&2
             exit 1
           fi
-          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "release=true" >> "$GITHUB_OUTPUT"
 
   windows:
     needs: version
+    if: needs.version.outputs.release == 'true'
     runs-on: windows-2025
     timeout-minutes: 20
     steps:
@@ -68,7 +96,11 @@ jobs:
 
   macos:
     needs: version
-    runs-on: macos-26
+    if: needs.version.outputs.release == 'true'
+    # GitHub's Intel Macs: the Apple-silicon ones (macos-26) were too short of
+    # capacity to start at all. Xcode on it still builds both halves of the
+    # universal app.
+    runs-on: macos-15-intel
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7
@@ -88,6 +120,7 @@ jobs:
 
   linux:
     needs: version
+    if: needs.version.outputs.release == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
@@ -127,6 +160,7 @@ jobs:
 
   web:
     needs: version
+    if: needs.version.outputs.release == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
@@ -153,6 +187,8 @@ jobs:
     environment: release
     permissions:
       contents: write
+      # To start web.yml for the new tag (see the last step).
+      actions: write
     steps:
       - uses: actions/checkout@v7
         with:
@@ -186,6 +222,18 @@ jobs:
       - name: Publish the release
         env:
           GH_TOKEN: ${{ github.token }}
-          TAG: ${{ github.ref_name }}
+          VERSION: ${{ needs.version.outputs.version }}
+        # Named after the version. On a push to main the tag doesn't exist yet:
+        # --target makes it on the commit that was built.
         run: |
-          gh release create "$TAG" release/* --repo "$GITHUB_REPOSITORY" --title "OOT SW2SE ${TAG#v}" --generate-notes --verify-tag
+          gh release create "v$VERSION" release/* --repo "$GITHUB_REPOSITORY" --title "OOT SW2SE $VERSION" \
+            --target "$GITHUB_SHA" --generate-notes
+
+      # A tag made by this workflow's token doesn't start other workflows, so
+      # start web.yml for it, which pushes the :<version> and :latest images.
+      - name: Push the web image for the release
+        if: github.ref_type != 'tag'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.version.outputs.version }}
+        run: gh workflow run web.yml --repo "$GITHUB_REPOSITORY" --ref "v$VERSION"
