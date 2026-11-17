@@ -12,7 +12,7 @@ Original editor by [Traiver](https://github.com/Traiver/OOT-SW2SE) and upstream 
 - Remove supported owned single items, optionally clearing their mapped acquisition flags. Acquisition history is kept by default; story and quest progress are not reset. Unequip weapons and shields in both eras first. Default clothes, quantities, and capacity upgrades use their own controls rather than inventory removal.
 - Export replacement files as a ZIP or to a new patch folder on Windows, macOS and Linux. Export names include a UTC timestamp followed by a UUID; replacement files sit inside a folder named with that same UTC timestamp (`yyyyMMdd_HHmmss`). Exports contain only replacement files, not a complete backup.
 - Toggle progress flags and change the spoken dialogue language when `option.sav` is available.
-- Open the most recently saved slot automatically, list every slot with its in-game save time, and give exported ZIP entries the slot's save time. See [Save time: newest slot and ZIP timestamps](#save-time-newest-slot-and-zip-timestamps).
+- Open the most recently saved slot automatically, list every slot with its in-game save time, and give exported ZIP entries the slot's save time. Backups with several slots also show a card per slot with its screenshot, save time, area, hearts, rupees and dungeon rewards; click one to open it. See [Save time: newest slot and ZIP timestamps](#save-time-newest-slot-and-zip-timestamps).
 - On Linux only: save edits straight back into the opened files, with an automatic backup of the replaced files, and more. See [Linux version](#linux-version).
 
 ## Linux version
