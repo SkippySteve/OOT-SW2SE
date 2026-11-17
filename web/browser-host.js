@@ -25,34 +25,104 @@
     'files/option.sav', 'files/account.sav', ...SLOTS.flatMap(slot => ['', 'files/'].flatMap(base =>
       [base + slot + '/progress.sav', base + slot + '/caption.sav']))];
 
-  // PC ports of the game (Longshot, Project ReLink) keep the same save files
-  // in one folder per profile: <data folder>/save/<user id> or
-  // <game folder>/user/save/<user id>. PORT_BASES are where profile folders
-  // are looked for, relative to the picked folder; GAME_USER is the profile
-  // both ports open. Same rules as PortSaves in the desktop hosts.
-  const PORT_BASES = ['', 'save/', 'user/save/'];
+  // PC ports (Longshot, Project ReLink) and Switch emulators (Lichii,
+  // Fritchii, Eden) keep the same save files as the Switch, in these layouts
+  // relative to their data or game folder; "<id>" is a profile folder. The
+  // picked folder may be any folder on the way to the save. GAME_USER is the
+  // profile both ports open. Same rules as PortSaves in the desktop hosts.
+  const TITLE_ID = '0400486024DEC000';
+  const SAVE_LAYOUTS = [
+    ['save', '<id>'],                                                      // Longshot; Project ReLink on Linux
+    ['user', 'save', '<id>'],                                              // Project ReLink's game folder
+    ['nand', 'user', 'save', '0000000000000000', '<id>', TITLE_ID],        // Lichii, Fritchii, Eden
+    ['nand', 'user', 'save', 'account', '<id>', TITLE_ID, '0'],            // their newer layout
+    ['user', 'nand', 'user', 'save', '0000000000000000', '<id>', TITLE_ID], // installed portable
+    ['user', 'nand', 'user', 'save', 'account', '<id>', TITLE_ID, '0'],
+  ];
   const GAME_USER = '5a3c9e1f0b7d24680000000000000001';
-  // The files of a profile folder `folder` (ending in "/") the layout reads.
+  // The files of a save folder `folder` (ending in "/") the layout reads.
   const profileCandidates = folder => [folder + 'option.sav', folder + 'account.sav',
     ...SLOTS.flatMap(slot => [folder + slot + '/progress.sav', folder + slot + '/caption.sav'])];
 
-  // The profile folder of a PC port in the picked folder, ending in "/", or
-  // '' when there is none. `paths` holds the files that exist.
-  function portProfile(paths) {
-    const pair = folder => paths.has(folder + 'progress.sav') && paths.has(folder + 'caption.sav');
-    for (const base of PORT_BASES) {
-      const profiles = [...new Set([...paths].flatMap(path => {
-        if (!path.startsWith(base)) return [];
-        const [name, slot] = path.slice(base.length).split('/');
-        return slot && SLOTS.includes(slot) && pair(base + name + '/' + slot + '/') ? [name] : [];
-      }))].sort();
-      if (!profiles.length) continue;
-      if (profiles.length === 1) return base + profiles[0] + '/';
-      const game = profiles.find(name => name.toLowerCase() === GAME_USER);
-      if (game) return base + game + '/';
-      throw new HostError('This folder holds the saves of several profiles. Open one of them: ' + profiles.join(', ') + '.');
+  // Every save folder the layouts reach in `paths` (the files that exist,
+  // relative to the picked folder), as [folder ending in "/", profile].
+  function layoutMatches(paths) {
+    const tree = new Map();
+    for (const path of paths) {
+      const parts = path.split('/');
+      for (let i = 0; i < parts.length - 1; i++) {
+        const parent = parts.slice(0, i).map(part => part + '/').join('');
+        if (!tree.has(parent)) tree.set(parent, new Set());
+        tree.get(parent).add(parts[i]);
+      }
     }
-    return '';
+    const holdsSlots = folder => SLOTS.some(slot => paths.has(folder + slot + '/progress.sav') && paths.has(folder + slot + '/caption.sav'));
+    const found = new Map();
+    function walk(folder, parts, profile) {
+      if (!parts.length) {
+        if (!found.has(folder) && holdsSlots(folder)) found.set(folder, profile ?? folder.split('/').at(-2));
+        return;
+      }
+      const [head, ...rest] = parts;
+      const names = [...(tree.get(folder) ?? [])].sort();
+      for (const name of head === '<id>' ? names : names.filter(name => name === head)) {
+        walk(folder + name + '/', rest, head === '<id>' ? name : profile);
+      }
+    }
+    for (const layout of SAVE_LAYOUTS) {
+      for (let start = 0; start < layout.length; start++) walk('', layout.slice(start), null);
+    }
+    return [...found];
+  }
+
+  // The save folder of a port or emulator in the picked folder, ending in "/",
+  // or '' when there is none.
+  function portProfile(paths) {
+    const matches = layoutMatches(paths);
+    if (!matches.length) return '';
+    if (matches.length === 1) return matches[0][0];
+    const game = matches.find(([, profile]) => profile.toLowerCase() === GAME_USER);
+    if (game) return game[0];
+    throw new HostError('This folder holds the saves of several profiles. Open one of them: ' +
+      [...new Set(matches.map(([, profile]) => profile))].sort().join(', ') + '.');
+  }
+
+  // With folder handles nothing is listed up front: this looks up the files
+  // backupLayout() may read, following the layouts down from `folder`, and
+  // returns their paths with a way to open each.
+  async function probeFolder(folder) {
+    const handles = new Map();
+    const fileAt = async path => {
+      const parts = path.split('/');
+      let dir = folder;
+      for (const part of parts.slice(0, -1)) dir = await dir.getDirectoryHandle(part);
+      return dir.getFileHandle(parts.at(-1));
+    };
+    const probe = paths => Promise.all(paths.map(path => fileAt(path).then(handle => handles.set(path, handle), () => {})));
+    await probe(CANDIDATES);
+    const seen = new Set();
+    async function walk(dir, prefix, parts) {
+      if (!parts.length) {
+        if (!seen.has(prefix)) {
+          seen.add(prefix);
+          await probe(profileCandidates(prefix));
+        }
+        return;
+      }
+      const [head, ...rest] = parts;
+      if (head !== '<id>') {
+        const child = await dir.getDirectoryHandle(head).catch(() => null);
+        if (child) await walk(child, prefix + head + '/', rest);
+        return;
+      }
+      for await (const [name, entry] of dir.entries()) {
+        if (entry.kind === 'directory') await walk(entry, prefix + name + '/', rest);
+      }
+    }
+    for (const layout of SAVE_LAYOUTS) {
+      for (let start = 0; start < layout.length; start++) await walk(folder, '', layout.slice(start));
+    }
+    return { paths: new Set(handles.keys()), open: path => handles.get(path).getFile() };
   }
 
   // Decides which files of the picked folder `root` the editor gets, and under
@@ -67,8 +137,9 @@
   //   3. A backup folder with slot_00 … slot_05 directly or inside "files",
   //      plus option.sav and account.sav next to the slots and manifest.json
   //      in the backup root. Picking the "files" folder itself works too.
-  //   4. A PC port's game or data folder, or its save folder: the profile
-  //      folder inside it is read like 3 (see portProfile).
+  //   4. A PC port's or Switch emulator's data or game folder, or any folder
+  //      on the way to the save: the save folder inside it is read like 3
+  //      (see SAVE_LAYOUTS).
   function backupLayout(root, paths) {
     const has = path => paths.has(path);
     const pair = folder => has(folder + 'progress.sav') && has(folder + 'caption.sav');
@@ -187,8 +258,8 @@
   }
 
   if (typeof module === 'object' && module.exports) {
-    module.exports = { backupLayout, readBackup, decodePatchFiles, decodePatchZip, fileName, CANDIDATES, PORT_BASES,
-      profileCandidates, HostError };
+    module.exports = { backupLayout, readBackup, decodePatchFiles, decodePatchZip, fileName, probeFolder, CANDIDATES,
+      SAVE_LAYOUTS, HostError };
     return;
   }
 
@@ -205,28 +276,8 @@
       if (aborted(error)) return null;
       throw error;
     }
-    const lookUp = async path => {
-      const parts = path.split('/');
-      let dir = folder;
-      for (const part of parts.slice(0, -1)) dir = await dir.getDirectoryHandle(part);
-      return dir.getFileHandle(parts.at(-1));
-    };
-    const handles = new Map();
-    const probe = paths => Promise.all(paths.map(path => lookUp(path).then(handle => handles.set(path, handle), () => {})));
-    await probe(CANDIDATES);
-    // A PC port's profile folders: the folders in each PORT_BASES folder.
-    await Promise.all(PORT_BASES.map(async base => {
-      let dir = folder;
-      try {
-        for (const part of base.split('/').filter(Boolean)) dir = await dir.getDirectoryHandle(part);
-      } catch {
-        return;
-      }
-      for await (const [name, entry] of dir.entries()) {
-        if (entry.kind === 'directory') await probe(profileCandidates(base + name + '/'));
-      }
-    }));
-    return readBackup(folder.name, new Set(handles.keys()), path => handles.get(path).getFile());
+    const { paths, open } = await probeFolder(folder);
+    return readBackup(folder.name, paths, open);
   }
 
   // Other browsers: a folder upload field. The files still stay in the browser.
