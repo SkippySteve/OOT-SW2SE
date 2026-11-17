@@ -21,9 +21,39 @@
 
   // Every path, relative to the picked folder, that backupLayout() may read.
   // The folder-handle reader only looks these up instead of listing the folder.
-  const CANDIDATES = ['progress.sav', 'caption.sav', 'option.sav', 'manifest.json', 'files/option.sav',
-    ...SLOTS.flatMap(slot => ['', 'files/'].flatMap(base =>
+  const CANDIDATES = ['progress.sav', 'caption.sav', 'option.sav', 'account.sav', 'manifest.json',
+    'files/option.sav', 'files/account.sav', ...SLOTS.flatMap(slot => ['', 'files/'].flatMap(base =>
       [base + slot + '/progress.sav', base + slot + '/caption.sav']))];
+
+  // PC ports of the game (Longshot, Project ReLink) keep the same save files
+  // in one folder per profile: <data folder>/save/<user id> or
+  // <game folder>/user/save/<user id>. PORT_BASES are where profile folders
+  // are looked for, relative to the picked folder; GAME_USER is the profile
+  // both ports open. Same rules as PortSaves in the desktop hosts.
+  const PORT_BASES = ['', 'save/', 'user/save/'];
+  const GAME_USER = '5a3c9e1f0b7d24680000000000000001';
+  // The files of a profile folder `folder` (ending in "/") the layout reads.
+  const profileCandidates = folder => [folder + 'option.sav', folder + 'account.sav',
+    ...SLOTS.flatMap(slot => [folder + slot + '/progress.sav', folder + slot + '/caption.sav'])];
+
+  // The profile folder of a PC port in the picked folder, ending in "/", or
+  // '' when there is none. `paths` holds the files that exist.
+  function portProfile(paths) {
+    const pair = folder => paths.has(folder + 'progress.sav') && paths.has(folder + 'caption.sav');
+    for (const base of PORT_BASES) {
+      const profiles = [...new Set([...paths].flatMap(path => {
+        if (!path.startsWith(base)) return [];
+        const [name, slot] = path.slice(base.length).split('/');
+        return slot && SLOTS.includes(slot) && pair(base + name + '/' + slot + '/') ? [name] : [];
+      }))].sort();
+      if (!profiles.length) continue;
+      if (profiles.length === 1) return base + profiles[0] + '/';
+      const game = profiles.find(name => name.toLowerCase() === GAME_USER);
+      if (game) return base + game + '/';
+      throw new HostError('This folder holds the saves of several profiles. Open one of them: ' + profiles.join(', ') + '.');
+    }
+    return '';
+  }
 
   // Decides which files of the picked folder `root` the editor gets, and under
   // which name, like BackupReader in the desktop hosts. `paths` holds the
@@ -35,8 +65,10 @@
   //   2. Any other folder that directly holds progress.sav and caption.sav,
   //      with option.sav when it is there.
   //   3. A backup folder with slot_00 … slot_05 directly or inside "files",
-  //      plus option.sav next to the slots and manifest.json in the backup
-  //      root. Picking the "files" folder itself works too.
+  //      plus option.sav and account.sav next to the slots and manifest.json
+  //      in the backup root. Picking the "files" folder itself works too.
+  //   4. A PC port's game or data folder, or its save folder: the profile
+  //      folder inside it is read like 3 (see portProfile).
   function backupLayout(root, paths) {
     const has = path => paths.has(path);
     const pair = folder => has(folder + 'progress.sav') && has(folder + 'caption.sav');
@@ -46,18 +78,22 @@
       // The editor expects "<name>/progress.sav".
       const name = !root.trim() || /[/\\:]/.test(root) ? 'Save' : root;
       const files = read('', name + '/');
-      if (has('option.sav')) files.push([name + '/option.sav', 'option.sav']);
+      for (const extra of ['option.sav', 'account.sav']) if (has(extra)) files.push([name + '/' + extra, extra]);
       return files;
     }
     // Prefer a "files" subfolder, but only if it really holds slots.
-    const nested = SLOTS.some(slot => pair('files/' + slot + '/')) ? 'files/' : '';
+    const holdsSlots = folder => SLOTS.some(slot => pair(folder + slot + '/'));
+    const at = holdsSlots('') || holdsSlots('files/') ? '' : portProfile(paths);
+    const nested = at + (holdsSlots(at + 'files/') ? 'files/' : '');
     const slots = SLOTS.filter(slot => pair(nested + slot + '/'));
     if (!slots.length) throw new HostError('No folder containing progress.sav and caption.sav was found.');
     const files = slots.flatMap(slot => read(nested + slot + '/', PREFIX + slot + '/'));
-    if (has(nested + 'option.sav')) files.push([PREFIX + 'option.sav', nested + 'option.sav']);
+    for (const extra of ['option.sav', 'account.sav']) {
+      if (has(nested + extra)) files.push([PREFIX + extra, nested + extra]);
+    }
     // manifest.json sits in the backup root, the folder around "files". When
     // the "files" folder itself was picked, that root can't be read.
-    if ((nested || root.toLowerCase() !== 'files') && has('manifest.json')) {
+    if (!at && (nested || root.toLowerCase() !== 'files') && has('manifest.json')) {
       files.push(['Backup/manifest.json', 'manifest.json']);
     }
     return files;
@@ -151,7 +187,8 @@
   }
 
   if (typeof module === 'object' && module.exports) {
-    module.exports = { backupLayout, readBackup, decodePatchFiles, decodePatchZip, fileName, CANDIDATES, HostError };
+    module.exports = { backupLayout, readBackup, decodePatchFiles, decodePatchZip, fileName, CANDIDATES, PORT_BASES,
+      profileCandidates, HostError };
     return;
   }
 
@@ -175,7 +212,20 @@
       return dir.getFileHandle(parts.at(-1));
     };
     const handles = new Map();
-    await Promise.all(CANDIDATES.map(path => lookUp(path).then(handle => handles.set(path, handle), () => {})));
+    const probe = paths => Promise.all(paths.map(path => lookUp(path).then(handle => handles.set(path, handle), () => {})));
+    await probe(CANDIDATES);
+    // A PC port's profile folders: the folders in each PORT_BASES folder.
+    await Promise.all(PORT_BASES.map(async base => {
+      let dir = folder;
+      try {
+        for (const part of base.split('/').filter(Boolean)) dir = await dir.getDirectoryHandle(part);
+      } catch {
+        return;
+      }
+      for await (const [name, entry] of dir.entries()) {
+        if (entry.kind === 'directory') await probe(profileCandidates(base + name + '/'));
+      }
+    }));
     return readBackup(folder.name, new Set(handles.keys()), path => handles.get(path).getFile());
   }
 

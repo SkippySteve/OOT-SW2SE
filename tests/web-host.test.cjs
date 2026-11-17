@@ -20,7 +20,7 @@ const opened = entries => editor.findBackupFiles(entries.map(([relativePath]) =>
 const pair = folder => [folder + 'progress.sav', folder + 'caption.sav'];
 
 test('a full backup sends every slot, option.sav and manifest.json under the desktop hosts\' paths', () => {
-  const entries = layout('MyBackup', ['manifest.json', 'files/option.sav', ...pair('files/slot_00/'),
+  const entries = layout('MyBackup', ['manifest.json', 'files/option.sav', 'files/account.sav', ...pair('files/slot_00/'),
     ...pair('files/slot_03/'), 'files/slot_04/progress.sav', 'files/unrelated.txt']);
   assert.deepEqual(entries, [
     ['Backup/files/slot_00/progress.sav', 'files/slot_00/progress.sav'],
@@ -28,6 +28,7 @@ test('a full backup sends every slot, option.sav and manifest.json under the des
     ['Backup/files/slot_03/progress.sav', 'files/slot_03/progress.sav'],
     ['Backup/files/slot_03/caption.sav', 'files/slot_03/caption.sav'],
     ['Backup/files/option.sav', 'files/option.sav'],
+    ['Backup/files/account.sav', 'files/account.sav'],
     ['Backup/manifest.json', 'manifest.json'],
   ]);
   const backup = opened(entries);
@@ -56,6 +57,40 @@ test('a picked slot folder or loose save opens as one save', () => {
   const looseBackup = opened(loose);
   assert.ok(looseBackup.slots[0].loose && looseBackup.option);
   assert.equal(layout(' ', pair(''))[0][0], 'Save/progress.sav');
+});
+
+test('a PC port\'s game or data folder opens the save folder of the profile it uses', () => {
+  const user = '5a3c9e1f0b7d24680000000000000001';
+  const profile = base => [...pair(base + 'slot_00/'), ...pair(base + 'slot_03/'), base + 'option.sav', base + 'account.sav'];
+  const expected = ['Backup/files/slot_00/progress.sav', 'Backup/files/slot_00/caption.sav',
+    'Backup/files/slot_03/progress.sav', 'Backup/files/slot_03/caption.sav', 'Backup/files/option.sav', 'Backup/files/account.sav'];
+  const cases = [
+    ['longshot', [...profile('save/' + user + '/'), 'cache/0/x.bin']],          // Longshot's data folder
+    ['save', profile(user + '/')],                                              // its save folder
+    [user, profile('')],                                                        // the profile folder itself
+    ['ReLink', [...profile('user/save/' + user + '/'), 'image.bin', 'romfs/a']], // Project ReLink's game folder
+    ['user', profile('save/' + user + '/')],                                    // its user folder
+  ];
+  for (const [name, files] of cases) {
+    const entries = layout(name, files);
+    assert.deepEqual(entries.map(([to]) => to), expected, name);
+    assert.equal(opened(entries).slots.length, 2, name);
+    // The folder-handle reader finds these files without listing the folder.
+    for (const [, from] of entries) {
+      const candidates = [...host.CANDIDATES, ...host.PORT_BASES.filter(base => from.startsWith(base))
+        .flatMap(base => host.profileCandidates(base + from.slice(base.length).split('/')[0] + '/'))];
+      assert.ok(candidates.includes(from), name + ': ' + from);
+    }
+  }
+  // Several profiles: the one the ports open, else a list to pick from.
+  const stray = '0123456789abcdef0123456789abcdef';
+  assert.equal(layout('save', [...profile(stray + '/'), ...profile(user + '/')])[0][1], user + '/slot_00/progress.sav');
+  assert.equal(layout('save', profile(stray + '/'))[0][1], stray + '/slot_00/progress.sav');
+  assert.throws(() => layout('save', [...profile(stray + '/'), ...profile('fedcba9876543210fedcba9876543210/')]),
+    /several profiles\. Open one of them: 0123456789abcdef0123456789abcdef, fedcba9876543210fedcba9876543210\./);
+  // Saves in the picked folder itself keep the old rules.
+  assert.equal(layout('Backup', [...pair('files/slot_01/'), ...profile('save/' + user + '/')])[0][0],
+    'Backup/files/slot_01/progress.sav');
 });
 
 test('folders without a complete save are refused', () => {

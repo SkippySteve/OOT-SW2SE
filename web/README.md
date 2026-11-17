@@ -19,7 +19,9 @@ other platforms, blocks all network access.
    - a backup folder (with `files/slot_00` … or `slot_00` … inside),
    - the `files` folder of a backup,
    - a single `slot_0X` folder,
-   - any folder that holds `progress.sav` and `caption.sav`.
+   - any folder that holds `progress.sav` and `caption.sav`,
+   - a PC port's game or data folder (Longshot, Project ReLink) or its `save`
+     folder: the editor opens the save folder inside it.
 3. Edit, then choose **Save Patch ZIP** (saved to your downloads) or
    **Export to Folder**. Apply the patch as described in the
    [main README](../README.md#changes-in-this-fork).
@@ -111,9 +113,10 @@ backup, save a patch ZIP, write a patch folder. `browser-host.js` provides the
 same bridge and answers the same requests in the browser:
 
 - **Open a backup:** with `showDirectoryPicker()` where the browser has it,
-  otherwise an `<input type="file" webkitdirectory>` field. The folder rules,
-  file names and size limits are those of the desktop hosts, so the editor
-  gets the same files under the same names.
+  otherwise an `<input type="file" webkitdirectory>` field. The folder rules
+  (including the PC ports' save folders), file names and size limits are
+  those of the desktop hosts, so the editor gets the same files under the
+  same names.
 - **Save a patch ZIP:** checked like on the desktop, then saved as a download.
 - **Write a patch folder:** checked like on the desktop (only the known save
   paths, same size limits), then written with the File System Access API into
