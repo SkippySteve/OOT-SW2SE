@@ -7,7 +7,7 @@ const catalog = JSON.parse(html.match(/<script id="catalog" type="application\/j
 const context = vm.createContext({ TextEncoder, TextDecoder, Blob, crypto: require('node:crypto').webcrypto,
   window: { chrome: { webview: { addEventListener() {}, postMessage() {} } } } });
 vm.runInContext(html.match(/<script>\s*('use strict';.*?)<\/script>/s)[1], context);
-const api = vm.runInContext('({readSlot, updateSlot, editOptions, removalIssue, acquisitionFlags, zip, exportLayout, saveTime, formatSaveTime, newestSlot, saveBackEntries, replaceOpenedFiles})', context);
+const api = vm.runInContext('({readSlot, updateSlot, editOptions, removalIssue, acquisitionFlags, zip, exportLayout, saveTime, formatSaveTime, newestSlot, saveBackEntries, replaceOpenedFiles, progressChecklist, checklistSummary, checklistGroups})', context);
 const editable = api.editOptions(catalog);
 const item = name => catalog.inventory.find(row => row[1] === name)[0];
 const registration = hash => catalog.registrations.find(([stocks]) => stocks.includes(hash));
@@ -158,6 +158,56 @@ function setSaveTime(f, [year, month, day, hour, minute, second], auto = 1) {
   for (const [hash, value] of values) view.setInt32(offsets.get(hash), value, true);
 }
 
+test('Save Copy holds every opened file, with the edited ones replaced and the originals only read', async () => {
+  const { findBackupFiles, copyLayout } = vm.runInContext('({ findBackupFiles, copyLayout })', context);
+  const reads = [];
+  const file = (webkitRelativePath, text) => ({ webkitRelativePath,
+    arrayBuffer: async () => { reads.push(webkitRelativePath); return new TextEncoder().encode(text).buffer; } });
+  const text = bytes => new TextDecoder().decode(bytes);
+  const files = ['slot_00/progress.sav', 'slot_00/caption.sav', 'slot_02/progress.sav', 'slot_02/caption.sav',
+    'option.sav', 'account.sav'].map(path => file('Backup/files/' + path, 'original ' + path));
+  const backup = findBackupFiles([...files, file('Backup/manifest.json', '{}')]);
+  assert.equal(backup.account.webkitRelativePath, 'Backup/files/account.sav');
+  const edits = [{ path: 'slot_02/progress.sav', after: new TextEncoder().encode('edited progress') },
+    { path: 'option.sav', after: new TextEncoder().encode('edited option') }];
+  const copy = await copyLayout(backup, edits, '{"manifest":1}', new Date(Date.UTC(2026, 10, 17, 9, 30, 5)),
+    '01234567-89ab-cdef-0123-456789abcdef');
+  assert.equal(copy.name, 'Ocarina-of-Time-Copy-20261117_093005_01234567-89ab-cdef-0123-456789abcdef');
+  assert.deepEqual(Array.from(copy.entries, ([path, bytes]) => [path, typeof bytes === 'string' ? bytes : text(bytes)]), [
+    ['20261117_093005/slot_00/progress.sav', 'original slot_00/progress.sav'],
+    ['20261117_093005/slot_00/caption.sav', 'original slot_00/caption.sav'],
+    ['20261117_093005/slot_02/progress.sav', 'edited progress'],
+    ['20261117_093005/slot_02/caption.sav', 'original slot_02/caption.sav'],
+    ['20261117_093005/option.sav', 'edited option'],
+    ['20261117_093005/account.sav', 'original account.sav'],
+    ['manifest.json', '{"manifest":1}'],
+  ]);
+  assert.ok(!reads.includes('Backup/files/slot_02/progress.sav'), 'edited files are not read again');
+
+  // A loose save keeps its files at the top of the timestamp folder.
+  const loose = findBackupFiles(['progress.sav', 'caption.sav', 'account.sav'].map(name => file('My Save/' + name, name)));
+  const looseCopy = await copyLayout(loose, [{ path: 'caption.sav', after: new Uint8Array([1]) }], undefined, new Date(0), 'u');
+  assert.deepEqual(Array.from(looseCopy.entries, ([path]) => path),
+    ['19700101_000000/progress.sav', '19700101_000000/caption.sav', '19700101_000000/account.sav']);
+  await assert.rejects(copyLayout(loose, [{ path: 'option.sav', after: new Uint8Array([1]) }]), /No opened file for option\.sav/);
+});
+
+test('Save Copy of a real edit: the copied slot reads back with the edit, the other slot unchanged', async () => {
+  const { copyLayout, slotEdits } = vm.runInContext('({ copyLayout, slotEdits })', context);
+  const edited = fixture(); const other = fixture();
+  const slot = edited.slot();
+  const after = api.updateSlot(slot, changes(slot, { rupees: 150 }), editable);
+  const asFile = (path, bytes) => ({ webkitRelativePath: path, arrayBuffer: async () => bytes.slice().buffer });
+  const backup = { slots: [
+    { id: 'slot_00', progress: asFile('a', other.p), caption: asFile('b', other.c) },
+    { id: 'slot_01', progress: asFile('c', edited.p), caption: asFile('d', edited.c) }] };
+  const copy = await copyLayout(backup, slotEdits({ id: 'slot_01' }, slot, after));
+  const entry = path => copy.entries.find(([name]) => name.endsWith(path))[1];
+  assert.equal(api.readSlot(entry('slot_01/progress.sav'), entry('slot_01/caption.sav')).rupees, 150);
+  assert.ok(Buffer.from(entry('slot_00/progress.sav')).equals(Buffer.from(other.p)), 'the other slot is copied as it was');
+  assert.equal(api.readSlot(edited.p, edited.c).rupees, 0, 'the opened bytes are unchanged');
+});
+
 test('save time is read from caption.sav to the second and shown as day.month.year', () => {
   const f = fixture(); setSaveTime(f, [2026, 11, 13, 0, 12, 41], 0);
   const time = api.saveTime(f.slot().c);
@@ -190,6 +240,28 @@ test('the newest slot is chosen by in-game save time; ties keep the lower slot',
   assert.equal(api.newestSlot([{ id: 'slot_04', time: null }]).id, 'slot_04');
   // Month before day: 03.11 is newer than 11.03.
   assert.equal(api.newestSlot([at('slot_00', 2026, 3, 11, 9, 0, 0), at('slot_01', 2026, 11, 3, 9, 0, 0)]).id, 'slot_01');
+});
+
+test('slot cards summarize each slot from caption.sav, with the area and dungeon rewards from progress.sav', () => {
+  const { slotSummary } = vm.runInContext('({ slotSummary })', context);
+  const f = fixture(['Item_Stone_Forest', 'Item_Medal_Fire', 'Item_Boomerang']);
+  f.string(0x1D6189DA, 'KokiriForest');
+  const caption = new DataView(f.c.buffer);
+  const setCaption = (hash, value) => {
+    for (let o = 40; o < 0x2A0; o += 8) if (caption.getUint32(o, true) === hash) caption.setInt32(o + 4, value, true);
+  };
+  setCaption(0x1E55ECC5, 7 * 4); setCaption(0x74BD05D0, 10 * 4); setCaption(0xA9557547, 123);
+  setCaption(0x9811A3F7, 2026); setCaption(0xDFD840D3, 11); setCaption(0xBD46F485, 13);
+  const summary = slotSummary(f.p, f.c, catalog);
+  assert.deepEqual([summary.hearts, summary.maxHearts, summary.rupees, summary.area, summary.rewards],
+    [7, 10, 123, 'KokiriForest', 2]);
+  assert.ok(summary.time.valid);
+  assert.equal(summary.image, null);              // the fixture has no screenshot
+  // Unreadable files leave their parts out instead of failing the backup.
+  const noProgress = slotSummary(new Uint8Array(), f.c, catalog);
+  assert.deepEqual([noProgress.area, noProgress.rewards, noProgress.rupees], [undefined, undefined, 123]);
+  const noCaption = slotSummary(f.p, new Uint8Array(), catalog);
+  assert.deepEqual([noCaption.time, noCaption.hearts, noCaption.rewards], [null, undefined, 2]);
 });
 
 test('ZIP entries carry the save time, or the current time when the save has none', async () => {
@@ -248,6 +320,94 @@ test('swim depth writes the float a save already carries, and leaves it alone wh
   assert.equal(untouched.p.view.getFloat32(untouched.p.at(depth), true), 6);
   assert.throws(() => edit(f, { swimDepth: 41 }), /between 0 and 40/);
   assert.throws(() => edit(f, { swimDepth: Number.NaN }), /between 0 and 40/);
+});
+
+// MurmurHash3 (x86, 32-bit, seed 0): the hash of a field name in the save.
+function murmur3(text) {
+  const data = new TextEncoder().encode(text);
+  const mul = (a, b) => Math.imul(a, b) >>> 0;
+  const rotl = (x, r) => ((x << r) | (x >>> (32 - r))) >>> 0;
+  let h = 0;
+  const tail = data.length & ~3;
+  for (let i = 0; i < tail; i += 4) {
+    const k = mul(rotl(mul(data[i] | data[i + 1] << 8 | data[i + 2] << 16 | data[i + 3] << 24, 0xCC9E2D51), 15), 0x1B873593);
+    h = (mul(rotl(h ^ k, 13), 5) + 0xE6546B64) >>> 0;
+  }
+  let k = 0;
+  for (let i = data.length - 1; i >= tail; i--) k = (k << 8) | data[i];
+  if (data.length & 3) h = (h ^ mul(rotl(mul(k, 0xCC9E2D51), 15), 0x1B873593)) >>> 0;
+  h = (h ^ data.length) >>> 0;
+  h = mul(h ^ (h >>> 16), 0x85EBCA6B);
+  h = mul(h ^ (h >>> 13), 0xC2B2AE35);
+  return (h ^ (h >>> 16)) >>> 0;
+}
+const objective = (entries, label) => entries.find(entry => entry.label === label);
+
+test('checklist sources exist in the catalog with the expected types; song flags match their field names', () => {
+  const type = new Map(catalog.fields.map(([h, t]) => [h, catalog.types[t]]));
+  assert.equal(murmur3('PlayerStatus.CurrentRupee'), 0xA77921D7);
+  const songs = { "Zelda's Lullaby": 'ZeldaLullaby', "Epona's Song": 'EponaSong', "Saria's Song": 'SariaSong',
+    "Sun's Song": 'SunSong', "Song of Time": 'TimeSong', "Song of Storms": 'StormSong', "Minuet of Forest": 'ForestMinuet',
+    "Bolero of Fire": 'FireBolero', "Serenade of Water": 'WaterSerenade', "Nocturne of Shadow": 'ShadowNocturne',
+    "Requiem of Spirit": 'SpiritRequiem', "Prelude of Light": 'LightPrelude' };
+  for (const { label, items } of api.checklistGroups) {
+    for (const [name, source] of items) {
+      if (source.item) assert.ok(catalog.inventory.some(row => row[1] === source.item), source.item);
+      if (source.flag) assert.equal(type.get(source.flag), 'Bool', name);
+      if (source.count) assert.equal(type.get(source.count), 'Int', name);
+      if (label === 'Songs') assert.equal(source.flag, murmur3('IsGet.Item_Melody_' + songs[name]), name);
+    }
+  }
+  assert.equal(api.checklistGroups.find(g => g.label === 'Songs').items.length, 12);
+});
+
+test('the checklist reads dungeon rewards, songs, items, upgrades and collectibles from the save', () => {
+  const f = fixture(['Item_Boomerang', 'Item_Stone_Forest', 'Weapon_Sword_Kokiri']);
+  f.set(murmur3('IsGet.Item_Melody_SariaSong'), 1);
+  f.set(murmur3('IsGet.Item_Melody_EponaSong'), 1);
+  f.set(0x04735978, 37);                          // Gold Skulltula Tokens
+  f.set(0xFBE01DA1, 10 * 4); f.set(0x31AB5580, 10 * 4);  // 10 hearts
+  const entries = api.progressChecklist(f.slot(), catalog);
+  assert.equal(objective(entries, "Inside the Deku Tree · Kokiri Emerald").value, 1);
+  assert.equal(objective(entries, "Forest Temple · Forest Medallion").value, 0);
+  assert.equal(objective(entries, "Epona's Song").value, 1);
+  assert.equal(objective(entries, "Sun's Song").value, 0);
+  assert.equal(objective(entries, "Boomerang").value, 1);
+  assert.equal(objective(entries, "Kokiri Sword").group, 'Equipment');
+  assert.deepEqual([objective(entries, "Gold Skulltula Tokens").value, objective(entries, "Maximum Hearts").value], [37, 10]);
+  assert.equal(objective(entries, "Magic Meter").value, 0);
+  const { overall, groups } = api.checklistSummary(entries);
+  const group = label => { const { done, total, percent } = groups.find(g => g.label === label); return [done, total, percent]; };
+  assert.deepEqual(group('Dungeons'), [1, 9, 11]);
+  assert.deepEqual(group('Songs'), [2, 12, 16]);
+  assert.deepEqual(group('Items'), [1, 13, 7]);
+  assert.deepEqual(group('Equipment'), [1, 8, 12]);
+  assert.deepEqual(group('Collectibles'), [0, 2, 43]);    // (0.37 + 0.5) / 2
+  // Overall: every objective's share, averaged; 5 done, 37/100 and 10/20 partly.
+  assert.deepEqual([overall.done, overall.total], [5, entries.length]);
+  assert.equal(overall.percent, Math.floor((5 + 0.37 + 0.5) / entries.length * 100));
+});
+
+test('checklist objectives whose field is missing are shown but left out of the totals', () => {
+  const f = fixture();
+  const hash = murmur3('IsGet.Item_Melody_SunSong');
+  new DataView(f.p.buffer).setUint32(40 + catalog.fields.findIndex(([h]) => h === hash) * 8, 0, true);
+  const entries = api.progressChecklist(f.slot(), catalog);
+  assert.equal(objective(entries, "Sun's Song").value, null);
+  const songs = api.checklistSummary(entries).groups.find(g => g.label === 'Songs');
+  assert.deepEqual([songs.done, songs.total], [0, 11]);
+});
+
+test('pending edits show up in the checklist the way they would be exported', () => {
+  const f = fixture();
+  const before = f.slot();
+  const after = edit(f, { additions: [item('Item_Hookshot'), item('Item_Medal_Fire')],
+    amounts: { ...before.counts, skulltulas: 50 }, vitals: { ...before.vitals, maxHearts: 12 } });
+  const entries = api.progressChecklist(after, catalog);
+  assert.equal(objective(entries, "Hookshot").value, 1);
+  assert.equal(objective(entries, "Fire Temple · Fire Medallion").value, 1);
+  assert.deepEqual([objective(entries, "Gold Skulltula Tokens").value, objective(entries, "Maximum Hearts").value], [50, 12]);
+  assert.equal(objective(api.progressChecklist(before, catalog), "Hookshot").value, 0);
 });
 
 module.exports = { fixture };

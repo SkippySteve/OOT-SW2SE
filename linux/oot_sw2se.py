@@ -210,8 +210,11 @@ class BackupReader:
       2. Any other folder that directly holds progress.sav + caption.sav (one
          loose save), optionally with option.sav next to them.
       3. A backup folder with slot_00 ... slot_05 subfolders, either directly
-         or inside a "files" subfolder, plus optional option.sav and
-         manifest.json. Picking the "files" folder itself works too.
+         or inside a "files" subfolder, plus optional option.sav,
+         account.sav and manifest.json. Picking the "files" folder itself
+         works too.
+      4. A PC port's game or data folder, or its save folder: the profile
+         folder inside it is read like 3 (see port_profile_folder).
     """
 
     def __init__(self) -> None:
@@ -245,10 +248,13 @@ class BackupReader:
             if not name.strip() or any(char in name for char in "/\\:"):
                 name = "Save"
             self._read_pair(folder, name + "/")
-            option = os.path.join(folder, "option.sav")
-            if is_regular_file(option):
-                self._read_file(option, name + "/option.sav")
+            for extra in ("option.sav", "account.sav"):
+                if is_regular_file(os.path.join(folder, extra)):
+                    self._read_file(os.path.join(folder, extra), name + "/" + extra)
             return
+
+        # A PC port's game or data folder: open the save folder inside it.
+        folder = port_profile_folder(folder) or folder
 
         # Prefer a "files" subfolder, but only if it really holds slots: an
         # empty or unrelated "files" folder must not hide slots at the root.
@@ -262,11 +268,11 @@ class BackupReader:
         self._read_extras(slots_folder)
 
     def _read_extras(self, slots_folder: str) -> None:
-        """Adds option.sav next to the slots and manifest.json in the backup
-        root, the parent of a folder named "files"."""
-        option = os.path.join(slots_folder, "option.sav")
-        if is_regular_file(option):
-            self._read_file(option, BACKUP_PREFIX + "option.sav")
+        """Adds option.sav and account.sav next to the slots and manifest.json
+        in the backup root, the parent of a folder named "files"."""
+        for extra in ("option.sav", "account.sav"):
+            if is_regular_file(os.path.join(slots_folder, extra)):
+                self._read_file(os.path.join(slots_folder, extra), BACKUP_PREFIX + extra)
         root = os.path.dirname(slots_folder) if os.path.basename(slots_folder).lower() == "files" else slots_folder
         manifest = os.path.join(root, "manifest.json")
         if is_regular_file(manifest):
@@ -332,6 +338,41 @@ def slot_folders(folder: str) -> list[tuple[str, str]]:
         if has_save_pair(path):
             result.append((slot, path))
     return result
+
+
+# The one profile Longshot and Project ReLink open (their nn_applet user id).
+PORT_GAME_USER = "5a3c9e1f0b7d24680000000000000001"
+
+
+def port_profile_folder(folder: str) -> str | None:
+    """The save folder of a PC port inside `folder`, or None.
+
+    PC ports of the game keep the same save files as the Switch, in one folder
+    per profile: Longshot in ~/.local/share/longshot/save/<user id> (Windows:
+    %APPDATA%\\Longshot\\save\\<user id>), Project ReLink in
+    ~/.local/share/relink/save/<user id> (Windows: <game folder>\\user\\save\\<user id>).
+    When `folder` holds no save itself, the profile folder is looked for in it,
+    in save/ and in user/save/. Same rules as PortSaves in Program.cs and
+    OOTSW2SE.swift.
+    """
+    if slot_folders(folder) or slot_folders(os.path.join(folder, "files")):
+        return None
+    for saves in (folder, os.path.join(folder, "save"), os.path.join(folder, "user", "save")):
+        try:
+            names = sorted(os.listdir(saves))
+        except OSError:
+            continue
+        profiles = [name for name in names if slot_folders(os.path.join(saves, name))]
+        if not profiles:
+            continue
+        if len(profiles) == 1:
+            return os.path.join(saves, profiles[0])
+        for name in profiles:
+            if name.lower() == PORT_GAME_USER:
+                return os.path.join(saves, name)
+        raise HostError("This folder holds the saves of several profiles. Open one of them: "
+                        + ", ".join(profiles) + ".")
+    return None
 
 
 def has_save_pair(folder: str) -> bool:
