@@ -106,11 +106,24 @@ class Test {
     save_slot(ports / 'Backup/files/slot_00')
     save_slot(ports / 'Backup/save' / game_user / 'slot_00')
     (ports / 'empty').mkdir()
+    # Switch emulators: Lichii's data folder, Eden's newer account layout, Fritchii installed portable.
+    save_slot(ports / 'lichii/nand/user/save/0000000000000000/E571F9CC/0400486024DEC000/slot_02')
+    (ports / 'lichii/nand/user/save/0000000000000000/E571F9CC/0400C3F00006E000/Play').mkdir(parents=True)
+    save_slot(ports / 'eden/nand/user/save/account/0123/0400486024DEC000/0/slot_00')
+    save_slot(ports / 'Fritchii/user/nand/user/save/0000000000000000/AB12/0400486024DEC000/slot_01')
+    save_slot(ports / 'twousers/nand/user/save/0000000000000000/0123456789abcdef0123456789abcdef/0400486024DEC000/slot_00')
+    save_slot(ports / 'twousers/nand/user/save/0000000000000000/fedcba9876543210fedcba9876543210/0400486024DEC000/slot_00')
     # Picked folder, and the profile folder expected (relative to ports), "none", or "several" for the error.
     cases = [('longshot', 'longshot/save/' + game_user), ('longshot/save', 'longshot/save/' + game_user),
              ('longshot/save/' + game_user, 'none'), ('ReLink', 'ReLink/user/save/' + game_user),
              ('ReLink/user', 'ReLink/user/save/' + game_user), ('several', 'several/save/' + game_user),
-             ('stray', 'several'), ('Backup', 'none'), ('empty', 'none')]
+             ('stray', 'several'), ('Backup', 'none'), ('empty', 'none'),
+             ('lichii', 'lichii/nand/user/save/0000000000000000/E571F9CC/0400486024DEC000'),
+             ('lichii/nand', 'lichii/nand/user/save/0000000000000000/E571F9CC/0400486024DEC000'),
+             ('lichii/nand/user/save/0000000000000000/E571F9CC', 'lichii/nand/user/save/0000000000000000/E571F9CC/0400486024DEC000'),
+             ('eden', 'eden/nand/user/save/account/0123/0400486024DEC000/0'),
+             ('Fritchii', 'Fritchii/user/nand/user/save/0000000000000000/AB12/0400486024DEC000'),
+             ('twousers', 'several')]
     expected = ''.join(picked + ' -> ' + result + '\n' for picked, result in cases)
     picked = [case[0] for case in cases]
 
@@ -134,7 +147,7 @@ for picked in CommandLine.arguments.dropFirst(2) {
     subprocess.run(['swiftc', '-swift-version', '6', '-module-cache-path', str(work / 'cache'), str(work / 'ports.swift'), '-o', str(work / 'swift-ports')], check=True)
     output = subprocess.run([str(work / 'swift-ports'), str(ports)] + picked, check=True, capture_output=True, text=True).stdout
     assert output == expected, output
-    print('PASS Swift: PC port save folders (Longshot, Project ReLink), several profiles, saves in the picked folder')
+    print('PASS Swift: save folders of PC ports and Switch emulators (Longshot, Project ReLink, Lichii, Fritchii, Eden), several profiles, saves in the picked folder')
 
     helper = cs.split('internal static class PortSaves', 1)[1].split('internal static class PatchFolderWriter', 1)[0]
     source = '''using System; using System.IO; using System.Collections.Generic;
@@ -159,4 +172,4 @@ class Test {
     subprocess.run(['mcs', '-langversion:5', '-out:' + str(work / 'cs-ports.exe'), str(work / 'Ports.cs')], check=True)
     output = subprocess.run(['mono', str(work / 'cs-ports.exe'), str(ports)] + picked, check=True, capture_output=True, text=True).stdout
     assert output == expected, output
-    print('PASS C#: PC port save folders (Longshot, Project ReLink), several profiles, saves in the picked folder')
+    print('PASS C#: save folders of PC ports and Switch emulators (Longshot, Project ReLink, Lichii, Fritchii, Eden), several profiles, saves in the picked folder')

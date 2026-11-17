@@ -203,35 +203,71 @@ struct HostError: LocalizedError {
 /// Reads save files from a folder chosen by the user. Based on
 /// `EditorWindow.ReadBackup` in Program.cs, with the extra layouts and checks
 /// described on `read(folder:)` and `readFile`.
-/// PC ports of the game keep the same save files as the Switch, in one folder
-/// per profile: Longshot in %APPDATA%\Longshot\save\<user id> on Windows and
-/// ~/.local/share/longshot/save/<user id> on Linux, Project ReLink in
-/// <game folder>\user\save\<user id> on Windows and
-/// ~/.local/share/relink/save/<user id> on Linux. When the picked folder holds
-/// no save itself, the profile folder is looked for in it, in save and in
-/// user/save. Same rules as the Windows and Linux hosts.
+/// PC ports (Longshot, Project ReLink) and Switch emulators (Lichii, Fritchii,
+/// Eden) keep the same save files as the Switch, in the layouts below, relative
+/// to their data or game folder. When the picked folder holds no save itself,
+/// the save folder is looked for along those paths; the picked folder may be
+/// any folder on the way. Same rules as the Windows and Linux hosts.
 enum PortSaves {
     /// The one profile both ports open (their nn_applet user id).
     static let gameUser = "5a3c9e1f0b7d24680000000000000001"
+    static let titleID = "0400486024DEC000"
 
-    /// The profile folder to open for `folder`, or nil when `folder` holds a
-    /// save itself or no profile folder is found.
+    /// "<id>" is a profile folder.
+    static let layouts: [[String]] = [
+        // Longshot (%APPDATA%\Longshot, ~/.local/share/longshot), Project ReLink on Linux (~/.local/share/relink)
+        ["save", "<id>"],
+        // Project ReLink's game folder on Windows (<game folder>\user\save\<id>)
+        ["user", "save", "<id>"],
+        // Lichii (%APPDATA%\lichii, ~/.local/share/lichii), Fritchii and Eden (.../eden), and their newer layout
+        ["nand", "user", "save", "0000000000000000", "<id>", titleID],
+        ["nand", "user", "save", "account", "<id>", titleID, "0"],
+        // The same emulators installed portable: a "user" folder next to the program
+        ["user", "nand", "user", "save", "0000000000000000", "<id>", titleID],
+        ["user", "nand", "user", "save", "account", "<id>", titleID, "0"],
+    ]
+
+    /// The save folder to open for `folder`, or nil when `folder` holds a save
+    /// itself or none is found.
     /// - Throws: `HostError` when several profiles hold saves and none is the
     ///   one the ports open.
     static func profileFolder(_ folder: URL) throws -> URL? {
         if holdsSlots(folder) || holdsSlots(folder.appendingPathComponent("files")) { return nil }
-        let candidates = [folder, folder.appendingPathComponent("save"),
-                          folder.appendingPathComponent("user").appendingPathComponent("save")]
-        for saves in candidates {
-            let children = (try? FileManager.default.contentsOfDirectory(at: saves, includingPropertiesForKeys: nil)) ?? []
-            let profiles = children.filter(holdsSlots).sorted { $0.lastPathComponent < $1.lastPathComponent }
-            if profiles.isEmpty { continue }
-            if profiles.count == 1 { return profiles[0] }
-            if let game = profiles.first(where: { $0.lastPathComponent.lowercased() == gameUser }) { return game }
-            throw HostError("This folder holds the saves of several profiles. Open one of them: " +
-                            profiles.map(\.lastPathComponent).joined(separator: ", ") + ".")
+        var found: [(profile: String, url: URL)] = []
+        for layout in layouts {
+            for start in layout.indices {
+                for match in matches(folder, Array(layout[start...]), profile: nil)
+                    where !found.contains(where: { $0.url.standardizedFileURL == match.url.standardizedFileURL }) {
+                    found.append(match)
+                }
+            }
         }
-        return nil
+        if found.isEmpty { return nil }
+        if found.count == 1 { return found[0].url }
+        if let game = found.first(where: { $0.profile.lowercased() == gameUser }) { return game.url }
+        let names = Set(found.map(\.profile)).sorted()
+        throw HostError("This folder holds the saves of several profiles. Open one of them: " +
+                        names.joined(separator: ", ") + ".")
+    }
+
+    private static func matches(_ folder: URL, _ parts: [String], profile: String?) -> [(profile: String, url: URL)] {
+        guard let head = parts.first else {
+            return holdsSlots(folder) ? [(profile ?? folder.lastPathComponent, folder)] : []
+        }
+        let rest = Array(parts.dropFirst())
+        if head != "<id>" {
+            let child = folder.appendingPathComponent(head)
+            return isFolder(child) ? matches(child, rest, profile: profile) : []
+        }
+        let children = (try? FileManager.default.contentsOfDirectory(at: folder, includingPropertiesForKeys: nil)) ?? []
+        return children.sorted { $0.lastPathComponent < $1.lastPathComponent }.filter(isFolder).flatMap { child in
+            matches(child, rest, profile: child.lastPathComponent)
+        }
+    }
+
+    private static func isFolder(_ url: URL) -> Bool {
+        var isDirectory: ObjCBool = false
+        return FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory) && isDirectory.boolValue
     }
 
     private static func holdsSlots(_ folder: URL) -> Bool {
@@ -264,8 +300,9 @@ enum BackupReader {
     ///      or inside a "files" subfolder, plus optional option.sav,
     ///      account.sav and manifest.json. Picking the "files" folder itself
     ///      works too.
-    ///   4. A PC port's game or data folder, or its save folder: the profile
-    ///      folder inside it is read like 3 (see `PortSaves`).
+    ///   4. A PC port's or Switch emulator's data or game folder, or any folder
+    ///      on the way to the save: the save folder inside it is read like 3
+    ///      (see `PortSaves`).
     /// - Throws: `HostError` when no save pair is found or limits are exceeded.
     static func read(folder: URL) throws -> [Entry] {
         var files: [Entry] = []
@@ -293,7 +330,7 @@ enum BackupReader {
             return files
         }
 
-        // A PC port's game or data folder: open the save folder inside it.
+        // A PC port's or Switch emulator's data or game folder: open the save folder inside it.
         let saveFolder = try PortSaves.profileFolder(folder) ?? folder
 
         // Prefer a "files" subfolder, but only if it really holds slots: an

@@ -252,9 +252,93 @@ test('every checklist objective links a guide page, and walkthrough chapters tra
   }
   const done = Array.from({ length: 20 }, (_, i) => chapterDone(i, f.slot(), catalog));
   assert.deepEqual(done.slice(0, 6), [true, true, false, null, false, false]);
-  assert.equal(areaName('DodongoCavern'), 'Dodongo Cavern');
+  assert.equal(areaName('DodongoCavern'), "Dodongo's Cavern");
+  assert.equal(areaName('BottomOfTheWell'), 'Bottom of the Well');
   assert.equal(areaName('LostWood'), 'Lost Woods');
-  assert.equal(areaName('HyruleField_Child'), 'Hyrule Field Child');
+  assert.equal(areaName('HyruleField_Child'), 'Hyrule Field (child)');
+  assert.equal(areaName('KakarikoVillage_Adult'), 'Kakariko Village (adult)');
+});
+
+test('parity tables use the fields their names say', () => {
+  const x = vm.runInContext('({ murmur3, minigameRecords, dungeonItems, heartPieceRewards, tradeStage, goldSkulltulas, heartPiecePickups })', context);
+  const names = { fishChild: ['MiniGame_Fishing_RecordFishSize_Child'], fishAdult: ['MiniGame_Fishing_RecordFishSize_Adult'],
+    archery: ['MiniGame_HorsebackArchery_BestScore'],
+    marathon: ['SubEvent_RunningRace_BestTime_Minute', 'SubEvent_RunningRace_BestTime_Second', 'SubEvent_RunningRace_BestTime_MilliSecond'],
+    epona: ['MiniGame_HorseRace_BestTime_Minutes', 'MiniGame_HorseRace_BestTime_Second', 'MiniGame_HorseRace_BestTime_MiliSecond'],
+    dampe: ['MiniGame_DampeRace_BestTime_Minutes', 'MiniGame_DampeRace_BestTime_Second', 'MiniGame_DampeRace_BestTime_MilliSecond'] };
+  for (const record of x.minigameRecords) {
+    assert.deepEqual(Array.from(record.fields ?? [record.field]), names[record.id].map(x.murmur3), record.id);
+  }
+  assert.equal(x.minigameRecords.find(r => r.id === 'epona').seconds, x.murmur3('MiniGame_HorseRace_BestTime'));
+  const type = new Map(catalog.fields.map(([h, t, n]) => [h, [catalog.types[t], n]]));
+  for (const { items } of x.dungeonItems) for (const { flag } of items) assert.equal(type.get(flag)?.[0], 'Bool');
+  const rewardNames = ['MiniGame_Fishing_GetHeartPiece', 'MiniGame_HorsebackArchery_GotaHeart', 'UnderTheGrave_DampeRace_HeartGeted',
+    'GraveYard_DiggingHoleTour_Drop_HeartPiece', 'Minigame_SkullKidSession_IsGetHeartPiece', 'Npc_SkullKid_Child_IsGetHeartPiece',
+    'GoronLargePot_IsGetHeartPiece', 'HyruleField_Enemy_Scrub_Business_HeartPiece_01', 'DeathMountain_Enemy_Scrub_Business_HeartPiece_01',
+    'SubEvent_FindRichard_GetHeartPiece', 'Npc_Hylia_001_IsGetHeartPiece'];
+  assert.deepEqual(Array.from(x.heartPieceRewards, ([, flag]) => flag), rewardNames.map(x.murmur3));
+  assert.equal(type.get(x.tradeStage)?.[0], 'Enum');
+  assert.equal(x.goldSkulltulas.length, 100);
+  assert.equal(new Set(Array.from(x.goldSkulltulas, ([, key]) => key)).size, 100);
+  assert.equal(x.heartPiecePickups.length, 14);
+});
+
+test('minigame records, bottle contents and the save time are written as asked, and checked', () => {
+  const { readRecords, formatRecordTime, parseRecordTime, saveTime } = vm.runInContext('({ readRecords, formatRecordTime, parseRecordTime, saveTime })', context);
+  assert.equal(formatRecordTime(54909), '09:09.09');
+  assert.equal(parseRecordTime('01:05.30'), 6530);
+  for (const bad of ['1:5.3', '00:60.00', 'abc', '100:00.00']) assert.equal(parseRecordTime(bad), null, bad);
+  const f = fixture();
+  const after = edit(f, { records: { fishChild: 52, archery: 1500, epona: parseRecordTime('00:39.50'), dampe: parseRecordTime('00:58.12') },
+    bottles: 2, bottleContents: [] });
+  assert.deepEqual(Object.fromEntries(Object.entries(readRecords(after.p)).filter(([k]) => ['fishChild', 'archery', 'epona', 'dampe'].includes(k))),
+    { fishChild: 52, archery: 1500, epona: 3950, dampe: 5812 });
+  assert.equal(after.p.view.getFloat32(after.p.at(0x084655F8), true), 39.5);
+  assert.throws(() => edit(f, { records: { fishAdult: 100 } }), /between 0 and 99/);
+  assert.throws(() => edit(f, { records: { marathon: -1 } }), /00:00.00 to 99:59.99/);
+  // Bottle contents: only owned bottles, only known contents.
+  const fairy = 0x6F49E357;
+  const withBottles = edit(f, { bottles: 2 });
+  const filled = api.readSlot(...api.updateSlot(withBottles, changes(withBottles, { bottles: 2, bottleContents: [undefined, fairy] }), editable));
+  assert.equal(filled.bottles[1].content, fairy);
+  assert.throws(() => api.updateSlot(withBottles, changes(withBottles, { bottles: 2, bottleContents: [, , fairy] }), editable), /not owned/);
+  assert.throws(() => api.updateSlot(withBottles, changes(withBottles, { bottles: 2, bottleContents: [0x1234] }), editable), /Unknown bottle/);
+  // The save time on the load screen.
+  const dated = edit(f, { saveTime: { year: 2026, month: 2, day: 28, hour: 23, minute: 5, second: 9 } });
+  const t = saveTime(dated.c);
+  assert.deepEqual([t.year, t.month, t.day, t.hour, t.minute, t.second, t.valid], [2026, 2, 28, 23, 5, 9, true]);
+  assert.throws(() => edit(f, { saveTime: { year: 2026, month: 2, day: 30, hour: 0, minute: 0, second: 0 } }), /not a valid date/);
+});
+
+test('the Pocket Egg and Pocket Cucco move the trading quest forward, never back', () => {
+  const { murmur3 } = vm.runInContext('({ murmur3 })', context);
+  const stage = 0x26A2E01C;
+  const f = fixture();
+  f.set(stage, murmur3('Ready') | 0);
+  const egg = edit(f, { additions: [item('Item_PocketEgg')] });
+  assert.equal(egg.p.u32(egg.p.at(stage)), murmur3('WaitEggHatch'));
+  f.set(item('Item_PocketEgg'), 1); f.set(stage, murmur3('WaitEggHatch') | 0);
+  const cucco = edit(f, { additions: [item('Item_PocketCucco')] });
+  assert.equal(cucco.p.u32(cucco.p.at(stage)), murmur3('EggHatched'));
+  assert.equal(cucco.p.int(item('Item_PocketEgg')), 0, 'the Pocket Cucco replaces the egg');
+  f.set(item('Item_PocketEgg'), 0); f.set(stage, murmur3('Step03') | 0);
+  assert.throws(() => edit(f, { additions: [item('Item_PocketEgg')] }), /past this item/);
+});
+
+test('collected Gold Skulltulas and Pieces of Heart are read from the keys at the end of progress.sav', () => {
+  const { placedFlags, goldSkulltulas } = vm.runInContext('({ placedFlags, goldSkulltulas })', context);
+  const f = fixture();
+  const keys = [goldSkulltulas[0][1], goldSkulltulas[5][1], '00000000deadbeef'];
+  const bytes = new Uint8Array(f.p.length + (keys.length + 1) * 8);
+  bytes.set(f.p);
+  const view = new DataView(bytes.buffer);
+  keys.forEach((key, i) => view.setBigUint64(f.p.length + i * 8, BigInt('0x' + key), true));
+  const index = catalog.fields.findIndex(([h]) => h === 0xA3DB7114);
+  view.setUint32(44 + index * 8, f.p.length, true);
+  const slot = api.readSlot(bytes, f.c);
+  const found = placedFlags(slot.p);
+  assert.deepEqual([...found], keys);
+  assert.equal(goldSkulltulas.filter(([, key]) => found.has(key)).length, 2);
 });
 
 test('save time is read from caption.sav to the second and shown as day.month.year', () => {

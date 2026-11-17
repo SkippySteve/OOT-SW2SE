@@ -20,8 +20,9 @@ other platforms, blocks all network access.
    - the `files` folder of a backup,
    - a single `slot_0X` folder,
    - any folder that holds `progress.sav` and `caption.sav`,
-   - a PC port's game or data folder (Longshot, Project ReLink) or its `save`
-     folder: the editor opens the save folder inside it.
+   - the data or game folder of a PC port (Longshot, Project ReLink) or a
+     Switch emulator (Lichii, Fritchii, Eden), or any folder on the way to
+     the save: the editor opens the save folder inside it.
 3. Edit, then choose **Save Patch ZIP** (saved to your downloads) or
    **Export to Folder**. Apply the patch as described in the
    [main README](../README.md#changes-in-this-fork).
