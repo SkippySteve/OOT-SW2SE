@@ -36,11 +36,10 @@ on:
 
 jobs:
   build:
-    # Pinned rather than macos-latest, so the toolchain changes only on
-    # purpose: Xcode 26 builds both halves of the universal app (Apple
-    # silicon and Intel), while macOS 27 dropped Intel Macs and later Xcode
-    # releases may stop building for them. Move up when GitHub retires it.
-    runs-on: macos-26
+    # GitHub's Intel Macs: the Apple-silicon ones (macos-26) were too short of
+    # capacity to start at all. Xcode on it still builds both halves of the
+    # universal app (Apple silicon and Intel). Same machine as release.yml.
+    runs-on: macos-15-intel
     timeout-minutes: 20
     permissions:
       # Write access is used only by the release step to attach the zip.

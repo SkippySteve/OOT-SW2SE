@@ -18,8 +18,8 @@ using Microsoft.Web.WebView2.WinForms;
 [assembly: AssemblyTitle("OOT SW2SE")]
 [assembly: AssemblyDescription("Offline save editor for the Nintendo Switch 2 remake")]
 [assembly: AssemblyProduct("OOT SW2SE")]
-[assembly: AssemblyVersion("2.0.0.0")]
-[assembly: AssemblyFileVersion("2.0.0.0")]
+[assembly: AssemblyVersion("2.0.1.0")]
+[assembly: AssemblyFileVersion("2.0.1.0")]
 
 internal static class Program
 {
