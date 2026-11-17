@@ -269,7 +269,7 @@ internal sealed class EditorWindow : Form
             return files;
         }
 
-        // A PC port's game or data folder: open the save folder inside it.
+        // A PC port's or Switch emulator's data or game folder: open the save folder inside it.
         string profile = PortSaves.ProfileFolder(folder);
         if (profile != null) folder = profile;
 
@@ -387,38 +387,78 @@ internal sealed class EditorWindow : Form
     }
 }
 
-// PC ports of the game keep the same save files as the Switch, in one folder per
-// profile: Longshot in %APPDATA%\Longshot\save\<user id> (Linux:
-// ~/.local/share/longshot/save/<user id>), Project ReLink in
-// <game folder>\user\save\<user id> (Linux: ~/.local/share/relink/save/<user id>).
-// When the picked folder holds no save itself, the profile folder is looked for
-// in it, in save and in user\save. Same rules as the macOS and Linux hosts.
+// PC ports (Longshot, Project ReLink) and Switch emulators (Lichii, Fritchii,
+// Eden) keep the same save files as the Switch, in the layouts below, relative
+// to their data or game folder. When the picked folder holds no save itself,
+// the save folder is looked for along those paths; the picked folder may be any
+// folder on the way. Same rules as the macOS and Linux hosts.
 internal static class PortSaves
 {
     // The one profile both ports open (their nn_applet user id).
     internal const string GameUser = "5a3c9e1f0b7d24680000000000000001";
+    internal const string TitleId = "0400486024DEC000";
 
-    // The profile folder to open for `folder`, or null when `folder` holds a save
-    // itself or no profile folder is found.
+    // "<id>" is a profile folder.
+    private static readonly string[][] Layouts =
+    {
+        // Longshot (%APPDATA%\Longshot, ~/.local/share/longshot), Project ReLink on Linux (~/.local/share/relink)
+        new[] { "save", "<id>" },
+        // Project ReLink's game folder on Windows (<game folder>\user\save\<id>)
+        new[] { "user", "save", "<id>" },
+        // Lichii (%APPDATA%\lichii, ~/.local/share/lichii), Fritchii and Eden (...\eden), and their newer layout
+        new[] { "nand", "user", "save", "0000000000000000", "<id>", TitleId },
+        new[] { "nand", "user", "save", "account", "<id>", TitleId, "0" },
+        // The same emulators installed portable: a "user" folder next to the program
+        new[] { "user", "nand", "user", "save", "0000000000000000", "<id>", TitleId },
+        new[] { "user", "nand", "user", "save", "account", "<id>", TitleId, "0" },
+    };
+
+    // The save folder to open for `folder`, or null when `folder` holds a save
+    // itself or none is found.
     internal static string ProfileFolder(string folder)
     {
         if (HoldsSlots(folder) || HoldsSlots(Path.Combine(folder, "files"))) return null;
-        foreach (string saves in new[] { folder, Path.Combine(folder, "save"), Path.Combine(folder, "user", "save") })
+        var paths = new List<string>();
+        var profiles = new List<string>();
+        foreach (string[] layout in Layouts)
+            for (int start = 0; start < layout.Length; start++)
+                Collect(folder, layout, start, null, paths, profiles);
+        if (paths.Count == 0) return null;
+        if (paths.Count == 1) return paths[0];
+        for (int i = 0; i < paths.Count; i++)
+            if (string.Equals(profiles[i], GameUser, StringComparison.OrdinalIgnoreCase)) return paths[i];
+        var names = new List<string>();
+        foreach (string profile in profiles)
+            if (!names.Contains(profile)) names.Add(profile);
+        names.Sort(StringComparer.Ordinal);
+        throw new IOException("This folder holds the saves of several profiles. Open one of them: " +
+            string.Join(", ", names) + ".");
+    }
+
+    private static void Collect(string folder, string[] layout, int index, string profile, List<string> paths, List<string> profiles)
+    {
+        if (index == layout.Length)
         {
-            if (!Directory.Exists(saves)) continue;
-            var profiles = new List<string>();
-            foreach (string profile in Directory.GetDirectories(saves))
-                if (HoldsSlots(profile)) profiles.Add(profile);
-            if (profiles.Count == 0) continue;
-            if (profiles.Count == 1) return profiles[0];
-            foreach (string profile in profiles)
-                if (string.Equals(Path.GetFileName(profile), GameUser, StringComparison.OrdinalIgnoreCase)) return profile;
-            var names = profiles.ConvertAll(p => Path.GetFileName(p));
-            names.Sort(StringComparer.Ordinal);
-            throw new IOException("This folder holds the saves of several profiles. Open one of them: " +
-                string.Join(", ", names) + ".");
+            string full = Path.GetFullPath(folder);
+            if (HoldsSlots(full) && !paths.Contains(full))
+            {
+                paths.Add(full);
+                profiles.Add(profile ?? Path.GetFileName(full));
+            }
+            return;
         }
-        return null;
+        if (layout[index] != "<id>")
+        {
+            string child = Path.Combine(folder, layout[index]);
+            if (Directory.Exists(child)) Collect(child, layout, index + 1, profile, paths, profiles);
+            return;
+        }
+        string[] children;
+        try { children = Directory.GetDirectories(folder); }
+        catch (IOException) { return; }
+        catch (UnauthorizedAccessException) { return; }
+        Array.Sort(children, StringComparer.Ordinal);
+        foreach (string child in children) Collect(child, layout, index + 1, Path.GetFileName(child), paths, profiles);
     }
 
     private static bool HoldsSlots(string folder)

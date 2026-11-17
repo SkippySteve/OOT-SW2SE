@@ -213,8 +213,9 @@ class BackupReader:
          or inside a "files" subfolder, plus optional option.sav,
          account.sav and manifest.json. Picking the "files" folder itself
          works too.
-      4. A PC port's game or data folder, or its save folder: the profile
-         folder inside it is read like 3 (see port_profile_folder).
+      4. A PC port's or Switch emulator's data or game folder, or any folder
+         on the way to the save: the save folder inside it is read like 3
+         (see port_profile_folder).
     """
 
     def __init__(self) -> None:
@@ -253,7 +254,7 @@ class BackupReader:
                     self._read_file(os.path.join(folder, extra), name + "/" + extra)
             return
 
-        # A PC port's game or data folder: open the save folder inside it.
+        # A PC port's or Switch emulator's data or game folder: open the save folder inside it.
         folder = port_profile_folder(folder) or folder
 
         # Prefer a "files" subfolder, but only if it really holds slots: an
@@ -342,37 +343,68 @@ def slot_folders(folder: str) -> list[tuple[str, str]]:
 
 # The one profile Longshot and Project ReLink open (their nn_applet user id).
 PORT_GAME_USER = "5a3c9e1f0b7d24680000000000000001"
+TITLE_ID = "0400486024DEC000"
+
+# Where PC ports and Switch emulators keep the game's save folder (the folder
+# with slot_00 ... and option.sav), relative to their data or game folder.
+# "<id>" is a profile folder. The picked folder may be any folder along a path:
+# the data folder, "save", a profile folder, and so on.
+SAVE_LAYOUTS = (
+    # Longshot (~/.local/share/longshot, %APPDATA%\Longshot), Project ReLink on Linux (~/.local/share/relink)
+    ("save", "<id>"),
+    # Project ReLink's game folder on Windows (<game folder>\user\save\<id>)
+    ("user", "save", "<id>"),
+    # Lichii (~/.local/share/lichii, %APPDATA%\lichii), Fritchii and Eden (.../eden):
+    # nand/user/save/0000000000000000/<profile>/<title id>, and the newer account layout
+    ("nand", "user", "save", "0000000000000000", "<id>", TITLE_ID),
+    ("nand", "user", "save", "account", "<id>", TITLE_ID, "0"),
+    # The same emulators installed portable: a "user" folder next to the program
+    ("user", "nand", "user", "save", "0000000000000000", "<id>", TITLE_ID),
+    ("user", "nand", "user", "save", "account", "<id>", TITLE_ID, "0"),
+)
+
+
+def _layout_matches(folder: str, parts: tuple[str, ...], profile: str | None) -> list[tuple[str, str]]:
+    """(profile, path) of every folder below `folder` that follows `parts` and holds a save."""
+    if not parts:
+        return [(profile or os.path.basename(folder), folder)] if slot_folders(folder) else []
+    head, rest = parts[0], parts[1:]
+    if head != "<id>":
+        child = os.path.join(folder, head)
+        return _layout_matches(child, rest, profile) if os.path.isdir(child) else []
+    try:
+        names = sorted(name for name in os.listdir(folder) if os.path.isdir(os.path.join(folder, name)))
+    except OSError:
+        return []
+    return [match for name in names for match in _layout_matches(os.path.join(folder, name), rest, name)]
 
 
 def port_profile_folder(folder: str) -> str | None:
-    """The save folder of a PC port inside `folder`, or None.
+    """The game's save folder inside `folder`, or None.
 
-    PC ports of the game keep the same save files as the Switch, in one folder
-    per profile: Longshot in ~/.local/share/longshot/save/<user id> (Windows:
-    %APPDATA%\\Longshot\\save\\<user id>), Project ReLink in
-    ~/.local/share/relink/save/<user id> (Windows: <game folder>\\user\\save\\<user id>).
-    When `folder` holds no save itself, the profile folder is looked for in it,
-    in save/ and in user/save/. Same rules as PortSaves in Program.cs and
+    PC ports (Longshot, Project ReLink) and Switch emulators (Lichii,
+    Fritchii, Eden) keep the same save files as the Switch, in the layouts of
+    SAVE_LAYOUTS. When `folder` holds no save itself, the save folder is looked
+    for along those paths. With several profiles, the one the ports open wins;
+    otherwise the error lists them. Same rules as PortSaves in Program.cs and
     OOTSW2SE.swift.
     """
     if slot_folders(folder) or slot_folders(os.path.join(folder, "files")):
         return None
-    for saves in (folder, os.path.join(folder, "save"), os.path.join(folder, "user", "save")):
-        try:
-            names = sorted(os.listdir(saves))
-        except OSError:
-            continue
-        profiles = [name for name in names if slot_folders(os.path.join(saves, name))]
-        if not profiles:
-            continue
-        if len(profiles) == 1:
-            return os.path.join(saves, profiles[0])
-        for name in profiles:
-            if name.lower() == PORT_GAME_USER:
-                return os.path.join(saves, name)
-        raise HostError("This folder holds the saves of several profiles. Open one of them: "
-                        + ", ".join(profiles) + ".")
-    return None
+    found: dict[str, str] = {}
+    for layout in SAVE_LAYOUTS:
+        for start in range(len(layout)):
+            for profile, path in _layout_matches(folder, layout[start:], None):
+                found.setdefault(os.path.normpath(path), profile)
+    if not found:
+        return None
+    if len(found) == 1:
+        return next(iter(found))
+    for path, profile in found.items():
+        if profile.lower() == PORT_GAME_USER:
+            return path
+    raise HostError("This folder holds the saves of several profiles. Open one of them: "
+                    + ", ".join(sorted(set(found.values()))) + ".")
 
 
 def has_save_pair(folder: str) -> bool:
