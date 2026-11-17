@@ -46,13 +46,28 @@ On the **Equipment** page, **Equip** sets the sword or shield Link holds in his 
 
 The Windows, macOS and Linux apps check this repository's latest release at start, and **Check for updates** (the version under the sidebar) checks on request. A new version installs after a second click and restarts the app. Each release's file list is signed, and the apps check that signature and each file's SHA-256 before they replace anything. See [`update/README.md`](update/README.md) for how it works, how releases are made, and the one-time signing key setup.
 
+### Songs, records, dungeon items and collectibles
+
+- **Songs** (Overview): learn or forget any of the twelve songs (`IsGet.Item_Melody_<song>`); story progress stays as it is. Scarecrow's Song is left out.
+- **Minigame Records** (Overview): the biggest fish as child and adult (0–99 cm), the horseback archery score (0–2,000), and the best times of the marathon, Epona's obstacle course and Dampé's race (MM:ss.ff). Only the records change; the rewards the game gives for them are not added or removed. The marathon runner's own record stays as it is.
+- **Dungeon Items** (Collection): the map, compass and Boss Key of each dungeon that has them (`DungeonInfo.<dungeon>.IsGet…`), next to the small keys.
+- **Bottles** (Collection): choose what each bottle holds: empty, potions, blue fire, fish, Ruto's Letter, Poes, bugs, a fairy or milk.
+- **Pocket Egg and Pocket Cucco** (Items): adding one moves the adult trading quest to that item's stage and replaces the other, but never moves a later stage back.
+- **Gold Skulltulas and Pieces of Heart** (Collection): which of the 100 Gold Skulltulas a save has, by place, and which Pieces of Heart lying in the world or given by people and minigames. The game keeps one flag per placed object, keyed by its placement in the map files; the keys of the set flags sit at the end of `progress.sav`. Read only for now.
+- **Save time** (Overview → Save Details): the date and time shown on the game's load screen.
+- **What's new**: when an update is offered, its release notes open in the browser.
+
 ### Field names
 
-1,109 more save fields now have names, so they show by name in the Field Inspector, and the true/false ones can be edited under Progress Flags. They were found the same way as the songs: by hashing the identifiers that appear in the game's own data files with MurmurHash3 and matching them against the save's field hashes. Only the names are in the catalog; nothing from the game files is.
+1,344 more save fields now have names, so they show by name in the Field Inspector, and the true/false ones can be edited under Progress Flags. They were found the same way as the songs: by hashing the identifiers that appear in the game's own data files with MurmurHash3 and matching them against the save's field hashes. Only the names are in the catalog; nothing from the game files is.
 
 ### Not here
 
-Gold Skulltula and Piece of Heart locations, one by one: the save keeps them in a form that isn't decoded yet, so the editor shows the totals only.
+- **The in-game clock:** the field that holds the time of day isn't identified yet.
+- **Rewards tied to minigame records** (Heart Pieces, Golden Scale, quiver, Malon's cow) are not granted or removed with the record.
+- **Collecting a Gold Skulltula or Piece of Heart by place:** the list is read only; changing it changes the save file's length.
+- **Masks unlocked in the Happy Mask Shop** don't count in the checklist yet: the shop's unlock flag isn't identified.
+- Music and sounds, and guides shown inside the editor (they open on IGN instead).
 
 ## Checklist
 
