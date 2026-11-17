@@ -264,8 +264,14 @@ internal sealed class EditorWindow : Form
             ReadPair(files, folder, name + "/", ref bytes);
             string localOption = Path.Combine(folder, "option.sav");
             if (File.Exists(localOption)) ReadFile(files, localOption, name + "/option.sav", ref bytes);
+            string localAccount = Path.Combine(folder, "account.sav");
+            if (File.Exists(localAccount)) ReadFile(files, localAccount, name + "/account.sav", ref bytes);
             return files;
         }
+
+        // A PC port's game or data folder: open the save folder inside it.
+        string profile = PortSaves.ProfileFolder(folder);
+        if (profile != null) folder = profile;
 
         string nested = Path.Combine(folder, "files");
         string parent = Directory.Exists(nested) ? nested : folder;
@@ -277,8 +283,10 @@ internal sealed class EditorWindow : Form
         }
         if (files.Count == 0) throw new IOException("No folder containing progress.sav and caption.sav was found.");
         string option = Path.Combine(parent, "option.sav");
+        string account = Path.Combine(parent, "account.sav");
         string manifest = Path.Combine(folder, "manifest.json");
         if (File.Exists(option)) ReadFile(files, option, prefix + "option.sav", ref bytes);
+        if (File.Exists(account)) ReadFile(files, account, prefix + "account.sav", ref bytes);
         if (File.Exists(manifest)) ReadFile(files, manifest, "Backup/manifest.json", ref bytes);
         return files;
     }
@@ -376,6 +384,52 @@ internal sealed class EditorWindow : Form
         public string contents { get; set; }
         public PatchFolderWriter.Entry[] files { get; set; }
         public bool loaded { get; set; }
+    }
+}
+
+// PC ports of the game keep the same save files as the Switch, in one folder per
+// profile: Longshot in %APPDATA%\Longshot\save\<user id> (Linux:
+// ~/.local/share/longshot/save/<user id>), Project ReLink in
+// <game folder>\user\save\<user id> (Linux: ~/.local/share/relink/save/<user id>).
+// When the picked folder holds no save itself, the profile folder is looked for
+// in it, in save and in user\save. Same rules as the macOS and Linux hosts.
+internal static class PortSaves
+{
+    // The one profile both ports open (their nn_applet user id).
+    internal const string GameUser = "5a3c9e1f0b7d24680000000000000001";
+
+    // The profile folder to open for `folder`, or null when `folder` holds a save
+    // itself or no profile folder is found.
+    internal static string ProfileFolder(string folder)
+    {
+        if (HoldsSlots(folder) || HoldsSlots(Path.Combine(folder, "files"))) return null;
+        foreach (string saves in new[] { folder, Path.Combine(folder, "save"), Path.Combine(folder, "user", "save") })
+        {
+            if (!Directory.Exists(saves)) continue;
+            var profiles = new List<string>();
+            foreach (string profile in Directory.GetDirectories(saves))
+                if (HoldsSlots(profile)) profiles.Add(profile);
+            if (profiles.Count == 0) continue;
+            if (profiles.Count == 1) return profiles[0];
+            foreach (string profile in profiles)
+                if (string.Equals(Path.GetFileName(profile), GameUser, StringComparison.OrdinalIgnoreCase)) return profile;
+            var names = profiles.ConvertAll(p => Path.GetFileName(p));
+            names.Sort(StringComparer.Ordinal);
+            throw new IOException("This folder holds the saves of several profiles. Open one of them: " +
+                string.Join(", ", names) + ".");
+        }
+        return null;
+    }
+
+    private static bool HoldsSlots(string folder)
+    {
+        for (int i = 0; i < 6; i++)
+        {
+            string slot = Path.Combine(folder, "slot_" + i.ToString("00"));
+            if (File.Exists(Path.Combine(slot, "progress.sav")) && File.Exists(Path.Combine(slot, "caption.sav")))
+                return true;
+        }
+        return false;
     }
 }
 
