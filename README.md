@@ -2,11 +2,15 @@
 
 Save editor for the Nintendo Switch 2 remake of The Legend of Zelda: Ocarina of Time.
 
-Original editor by [Traiver](https://github.com/Traiver/OOT-SW2SE) and upstream contributors.
+Original editor by [Traiver](https://github.com/Traiver/OOT-SW2SE) and upstream contributors. This version adds a new look, guides, equipment and self-updating apps; see [This version](#this-version).
 
-![OOT SW2SE showing the stats of a loaded save](editor-screenshot.jpg)
+![OOT SW2SE: the Overview of a save, with its screenshot, hearts, dungeon rewards and progress](editor-screenshot.jpg)
 
+- Find your save on cards with its screenshot, place, hearts and dungeon rewards, then move between Overview, Checklist, Guides, Collection, Equipment, Items and Stats in the sidebar.
 - Edit rupees, hearts, magic, the swim depth & more.
+- Equip Link's sword and shield for his current era.
+- Open IGN's guide for any checklist objective, or the walkthrough in story order with your next step.
+- Update the Windows, macOS and Linux apps from inside the editor; updates are signed and checked before they are installed.
 - Change item quantities, bottles, small keys, and bag or quiver capacity.
 - Add missing items, including masks, with their acquisition flags set automatically.
 - Track progress with a checklist of dungeons, songs, quest items, items, equipment, upgrades and collectibles, with the share done per category and overall. It follows pending edits. See [Checklist](#checklist).
@@ -17,6 +21,39 @@ Original editor by [Traiver](https://github.com/Traiver/OOT-SW2SE) and upstream 
 - Open the most recently saved slot automatically, list every slot with its in-game save time, and give exported ZIP entries the slot's save time. Backups with several slots also show a card per slot with its screenshot, save time, area, hearts, rupees and dungeon rewards; click one to open it. See [Save time: newest slot and ZIP timestamps](#save-time-newest-slot-and-zip-timestamps).
 - On Linux only: save edits straight back into the opened files, with an automatic backup of the replaced files, and more. See [Linux version](#linux-version).
 
+## This version
+
+### Look and pages
+
+The editor is laid out like a game menu: dark wood, parchment panels and gold trim, with a sidebar of pages.
+
+- **Load Save** shows every slot of a backup as a card: the slot's own screenshot, save time, area, hearts and the six medallions and three stones it holds. The newest slot is opened already; click a card to open another.
+- **Overview** shows the open save the same way, the progress per checklist category, rupees and wallet, and the dungeon rewards.
+- **Checklist**, **Collection** (bags, quivers, quantities, bottles, small keys), **Equipment**, **Items**, **Stats**, **Progress Flags** and **Field Inspector** hold the editing tools that were one long page before.
+- **Export & Backups** explains the exports; the buttons stay at the bottom of every page, with the pending changes. **Save Copy ZIP** is the main one, since it never touches the original save.
+
+All art is drawn by the page itself (CSS and inline SVG); like before, the page loads nothing from the network. No game logo, item art, music or sounds are used.
+
+### Guides
+
+The **Guides** page links IGN's guides for the remake: the walkthrough in story order, item locations, collectibles, mini-games and how-tos, with search. With a save open, tracked walkthrough chapters show **Complete** or **Incomplete** (from items and flags the checklist reads, for example the Kokiri Emerald for the Deku Tree), and **Next tracked step** opens the first one not done. Every checklist objective has a **Guide** button too. Guides open in your browser; the apps only open IGN's Ocarina of Time Remake wiki. The guides are IGN's; this editor only links to them, and IGN is not affiliated with it.
+
+### Equipment
+
+On the **Equipment** page, **Equip** sets the sword or shield Link holds in his current era (`PlayerStatus.EquipWeapon`/`EquipShield`; the era comes from `Sequence_IsChildhood`). Only items Link has, or that the same patch adds, and that he can use in that era can be equipped: the Kokiri Sword, Deku Shield and Hylian Shield as a child; the Master Sword, Giant's Knife, Biggoron Sword, Hylian Shield and Mirror Shield as an adult. Read and checked against real saves; the in-game effect has not been tested yet.
+
+### Updates
+
+The Windows, macOS and Linux apps check this repository's latest release at start, and **Check for updates** (the version under the sidebar) checks on request. A new version installs after a second click and restarts the app. Each release's file list is signed, and the apps check that signature and each file's SHA-256 before they replace anything. See [`update/README.md`](update/README.md) for how it works, how releases are made, and the one-time signing key setup.
+
+### Field names
+
+1,109 more save fields now have names, so they show by name in the Field Inspector, and the true/false ones can be edited under Progress Flags. They were found the same way as the songs: by hashing the identifiers that appear in the game's own data files with MurmurHash3 and matching them against the save's field hashes. Only the names are in the catalog; nothing from the game files is.
+
+### Not here
+
+Gold Skulltula and Piece of Heart locations, one by one: the save keeps them in a form that isn't decoded yet, so the editor shows the totals only.
+
 ## Checklist
 
 The **Checklist** section lists 65 objectives the editor can read from `progress.sav`, in seven categories: the nine dungeon rewards, the twelve songs, quest items (Ocarina of Time, Master Sword, Gerudo Pass, Echo Gem, Biggoron Sword, Ganon's Castle barriers), items, equipment, upgrades (strength, scales, wallets, the largest bags and quiver, the Great Fairy gifts, the magic meters) and collectibles (Gold Skulltula Tokens out of 100, maximum hearts out of 20). Search it or show only what is still missing; the Overview shows the overall share.
@@ -25,7 +62,7 @@ The checklist shows the save as it would be after exporting the pending edits: a
 
 Each objective counts equally; a count counts by its share, so 37 of 100 Gold Skulltula Tokens count as 0.37 of one objective. The percentages cover these objectives only; they are not the game's own completion rate. An objective whose field is missing from a save is shown as such and left out of the totals. It only reads the save; nothing in the checklist changes it.
 
-Items come from their inventory stock, as in Inventory. Songs come from the `IsGet.Item_Melody_<song>` flags. Four of them (Epona's Song, Sun's Song, Song of Time, Prelude of Light) are not named in the catalog; their hashes were found by hashing the field names: a field's hash is the MurmurHash3 (x86, 32-bit, seed 0) of its name, for example `PlayerStatus.CurrentRupee` → `0xA77921D7`. `tests/editor.test.cjs` checks the song hashes this way.
+Items come from their inventory stock, as in Inventory. Songs come from the `IsGet.Item_Melody_<song>` flags. Four of them (Epona's Song, Sun's Song, Song of Time, Prelude of Light) were not named in the catalog; their hashes were found by hashing the field names: a field's hash is the MurmurHash3 (x86, 32-bit, seed 0) of its name, for example `PlayerStatus.CurrentRupee` → `0xA77921D7`. `tests/editor.test.cjs` checks the song hashes this way. See [Field names](#field-names) for the other names found like this.
 
 ## Linux version
 
@@ -141,12 +178,12 @@ The user id is `5a3c9e1f0b7d24680000000000000001` in both. **Open Backup** accep
 
 The editor only reads the files it opens. To get the edits into the game without touching the original save, use **Save Copy ZIP**. It holds the whole save with the edits: every slot, `option.sav` and `account.sav`, in a folder named with the UTC export time. Then close the game and put the copy in place:
 
-- **Longshot:** in Longshot Launcher, **Saves** → **Import from emulator** → **Choose a folder**, and pick the extracted folder. The launcher backs up the current save before it replaces it.
+- **Longshot:** on Longshot Launcher's **Saves** page, import from an emulator and choose another folder (the buttons are named slightly differently between launcher versions), then pick the extracted folder. The launcher backs up the current save before it replaces it.
 - **Project ReLink:** move the `<user id>` folder somewhere safe as your backup. Then copy the extracted folder into `save` and rename it to `<user id>`.
 
 On Linux, **Save Back** writes the edits straight into the port's save folder instead. It first keeps the files it replaces in a backup ZIP ([Save Back](linux/README.md#save-back)).
 
-Tested with the editor's checks and synthetic saves in these layouts, not with saves written by the ports.
+Tested with the editor's checks, synthetic saves in these layouts, and a real Longshot save (six slots): every slot opens, and its time, area, hearts, rupees, dungeon rewards, songs, equipment and voice language read as in the game.
 
 ## Changes in this fork
 

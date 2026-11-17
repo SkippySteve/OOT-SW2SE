@@ -62,3 +62,7 @@ path validation and byte-for-byte output checks, and how both hosts find a PC
 port's save folder. It also runs on Linux, for example in the `swift:6.0-noble`
 container with `mono-mcs` and `mono-runtime` installed. These checks do not
 replace in-game testing with a real save.
+
+## Releases and updates
+
+Push a version tag (`v2.0.1`) matching `Program.cs` to build every platform, sign the update manifest and publish the release ([`.github/workflows/release.yml`](.github/workflows/release.yml)). The apps update themselves from those releases once `update/public-key.pem` is in the build. See [`update/README.md`](update/README.md) for how updates are checked and the one-time signing key setup.
