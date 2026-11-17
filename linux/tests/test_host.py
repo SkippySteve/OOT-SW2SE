@@ -218,6 +218,37 @@ class BackupReaderTests(TempDirTest):
                                     "0123456789abcdef0123456789abcdef, fedcba9876543210fedcba9876543210"):
             host.BackupReader.read(os.path.dirname(saves))
 
+    def test_switch_emulator_data_folders(self) -> None:
+        # Lichii (~/.local/share/lichii), Fritchii and Eden (.../eden): the save of
+        # profile <id> sits in nand/user/save/0000000000000000/<id>/<title id>.
+        profile = "E571F9CCBF8984318D5EE33D0A8D0868"
+        data = os.path.join(self.root, "lichii")
+        title = self.port_save(os.path.join(data, "nand", "user", "save", "0000000000000000", profile), host.TITLE_ID)
+        write(os.path.join(data, "nand", "user", "save", "0000000000000000", profile, "0400C3F00006E000", "Play", "account.sav"))
+        os.makedirs(os.path.join(data, "nand", "system", "save", "8000000000000010"))
+        for picked in (data, os.path.join(data, "nand"), os.path.join(data, "nand", "user", "save"),
+                       os.path.join(data, "nand", "user", "save", "0000000000000000"),
+                       os.path.join(data, "nand", "user", "save", "0000000000000000", profile), title):
+            self.assertEqual(paths(host.BackupReader.read(picked)), self.PORT_PATHS, picked)
+
+    def test_switch_emulator_account_layout_and_portable_install(self) -> None:
+        newer = os.path.join(self.root, "eden")
+        self.port_save(os.path.join(newer, "nand", "user", "save", "account", "0123", host.TITLE_ID), "0")
+        self.assertEqual(paths(host.BackupReader.read(newer)), self.PORT_PATHS)
+        portable = os.path.join(self.root, "Fritchii")
+        self.port_save(os.path.join(portable, "user", "nand", "user", "save", "0000000000000000", "AB12"), host.TITLE_ID)
+        write(os.path.join(portable, "fritchii.exe"))
+        self.assertEqual(paths(host.BackupReader.read(portable)), self.PORT_PATHS)
+
+    def test_several_emulator_profiles_are_listed(self) -> None:
+        saves = os.path.join(self.root, "lichii", "nand", "user", "save", "0000000000000000")
+        self.port_save(os.path.join(saves, "AAAA"), host.TITLE_ID)
+        self.port_save(os.path.join(saves, "BBBB"), host.TITLE_ID)
+        os.makedirs(os.path.join(saves, "CCCC", "0100000000010000"))  # another game's save only
+        with self.assertRaisesRegex(host.HostError, "several profiles. Open one of them: AAAA, BBBB."):
+            host.BackupReader.read(os.path.join(self.root, "lichii"))
+        self.assertEqual(host.port_profile_folder(os.path.join(saves, "BBBB")), os.path.join(saves, "BBBB", host.TITLE_ID))
+
     def test_saves_in_the_picked_folder_win_over_port_folders(self) -> None:
         backup = os.path.join(self.root, "Backup")
         save_pair(os.path.join(backup, "files", "slot_01"))

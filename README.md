@@ -16,7 +16,7 @@ Original editor by [Traiver](https://github.com/Traiver/OOT-SW2SE) and upstream 
 - Track progress with a checklist of dungeons, songs, quest items, items, equipment, upgrades and collectibles, with the share done per category and overall. It follows pending edits. See [Checklist](#checklist).
 - Remove supported owned single items, optionally clearing their mapped acquisition flags. Acquisition history is kept by default; story and quest progress are not reset. Unequip weapons and shields in both eras first. Default clothes, quantities, and capacity upgrades use their own controls rather than inventory removal.
 - Export replacement files as a ZIP or to a new patch folder on Windows, macOS and Linux. Export names include a UTC timestamp followed by a UUID; replacement files sit inside a folder named with that same UTC timestamp (`yyyyMMdd_HHmmss`). Exports contain only replacement files, not a complete backup.
-- Open saves from the PC ports [Longshot](https://git.magicbean.dev/MagicBeanDev/LongshotLauncher) and [Project ReLink](https://github.com/pixl27/ProjectReLink), and save a complete copy of the save with the edits (**Save Copy ZIP**) so the original stays as it is. See [Saves from PC ports](#saves-from-pc-ports).
+- Open saves from the PC ports [Longshot](https://git.magicbean.dev/MagicBeanDev/LongshotLauncher) and [Project ReLink](https://github.com/pixl27/ProjectReLink) and the emulators [Lichii](https://github.com/zortos293/Lichii) and [Fritchii](https://github.com/Frizti/Fritchii), and save a complete copy of the save with the edits (**Save Copy ZIP**) so the original stays as it is. See [Saves from PC ports and emulators](#saves-from-pc-ports-and-emulators).
 - Toggle progress flags and change the spoken dialogue language when `option.sav` is available.
 - Open the most recently saved slot automatically, list every slot with its in-game save time, and give exported ZIP entries the slot's save time. Backups with several slots also show a card per slot with its screenshot, save time, area, hearts, rupees and dungeon rewards; click one to open it. See [Save time: newest slot and ZIP timestamps](#save-time-newest-slot-and-zip-timestamps).
 - On Linux only: save edits straight back into the opened files, with an automatic backup of the replaced files, and more. See [Linux version](#linux-version).
@@ -165,25 +165,30 @@ All logic is in `editor.html` and shared by every platform. No host changes are 
 
 To go back to the previous behavior, open `backup.slots[0]` in `openBackupFiles` and call `zip(entries)` without a time. `tests/editor.test.cjs` covers field order, seconds, validation, tie handling and ZIP timestamps.
 
-## Saves from PC ports
+## Saves from PC ports and emulators
 
-The PC ports of the game keep the same save files as the Switch, `account.sav`, `option.sav` and one `slot_NN` folder per slot with `progress.sav` and `caption.sav`, in one folder per profile:
+The PC ports of the game and the Switch emulators keep the same save files as the Switch, `account.sav`, `option.sav` and one `slot_NN` folder per slot with `progress.sav` and `caption.sav`, in one folder per profile:
 
-| Port | Windows | Linux |
+| Program | Windows | Linux |
 | --- | --- | --- |
-| [Longshot](https://git.magicbean.dev/MagicBeanDev/LongshotLauncher) | `%APPDATA%\Longshot\save\<user id>\` | `~/.local/share/longshot/save/<user id>/` |
-| [Project ReLink](https://github.com/pixl27/ProjectReLink) | `<game folder>\user\save\<user id>\` (`%USERPROFILE%\Games\ReLink` by default) | `~/.local/share/relink/save/<user id>/` |
+| [Longshot](https://git.magicbean.dev/MagicBeanDev/LongshotLauncher) (port) | `%APPDATA%\Longshot\save\<user id>\` | `~/.local/share/longshot/save/<user id>/` |
+| [Project ReLink](https://github.com/pixl27/ProjectReLink) (port) | `<game folder>\user\save\<user id>\` (`%USERPROFILE%\Games\ReLink` by default) | `~/.local/share/relink/save/<user id>/` |
+| [Lichii](https://github.com/zortos293/Lichii) (emulator) | `%APPDATA%\lichii\nand\user\save\0000000000000000\<profile>\0400486024DEC000\` | `~/.local/share/lichii/nand/user/save/0000000000000000/<profile>/0400486024DEC000/` |
+| [Fritchii](https://github.com/Frizti/Fritchii) (emulator) | the same under `%APPDATA%\eden` | the same under `~/.local/share/eden` |
 
-The user id is `5a3c9e1f0b7d24680000000000000001` in both. **Open Backup** accepts that folder, the `save` folder, or the port's data or game folder (`Longshot`, `ReLink`, its `user` folder): the editor opens the save folder inside it. If several profile folders hold saves, it opens the one the ports use, or asks you to pick one when none of them is.
+The ports' user id is `5a3c9e1f0b7d24680000000000000001`. The emulators name the profile folder after the emulated Switch user, and also accept the newer layout `nand/user/save/account/<profile>/0400486024DEC000/0`. Installed portable (a `user` folder next to the program), the same folders are inside that `user` folder. Older Lichii builds kept their data in `eden` like Fritchii.
 
-The editor only reads the files it opens. To get the edits into the game without touching the original save, use **Save Copy ZIP**. It holds the whole save with the edits: every slot, `option.sav` and `account.sav`, in a folder named with the UTC export time. Then close the game and put the copy in place:
+**Open Backup** accepts the save folder itself or any folder on the way to it: the port's or emulator's data or game folder (`Longshot`, `ReLink`, `lichii`, `eden`, or the folder of a portable install), `nand`, `save`, a profile folder, and so on. The editor opens the save folder inside it. If several profiles hold saves of the game, it opens the one the ports use, or lists the profiles so you can open one of them.
+
+The editor only reads the files it opens. Close the game or emulator before you open a save, and again before you put an edited one in place. To get the edits into the game without touching the original save, use **Save Copy ZIP**. It holds the whole save with the edits: every slot, `option.sav` and `account.sav`, in a folder named with the UTC export time. Then close the game and put the copy in place:
 
 - **Longshot:** on Longshot Launcher's **Saves** page, import from an emulator and choose another folder (the buttons are named slightly differently between launcher versions), then pick the extracted folder. The launcher backs up the current save before it replaces it.
 - **Project ReLink:** move the `<user id>` folder somewhere safe as your backup. Then copy the extracted folder into `save` and rename it to `<user id>`.
+- **Lichii, Fritchii:** move the `0400486024DEC000` folder of your profile somewhere safe as your backup. Then copy the extracted folder in its place and rename it to `0400486024DEC000`.
 
-On Linux, **Save Back** writes the edits straight into the port's save folder instead. It first keeps the files it replaces in a backup ZIP ([Save Back](linux/README.md#save-back)).
+On Linux, **Save Back** writes the edits straight into the port's or emulator's save folder instead. It first keeps the files it replaces in a backup ZIP ([Save Back](linux/README.md#save-back)).
 
-Tested with the editor's checks, synthetic saves in these layouts, and a real Longshot save (six slots): every slot opens, and its time, area, hearts, rupees, dungeon rewards, songs, equipment and voice language read as in the game.
+Tested with the editor's checks, synthetic saves in these layouts, a real Longshot save and a real Lichii save (six slots each): every slot opens, and its time, area, hearts, rupees, dungeon rewards, songs, equipment and voice language read as in the game.
 
 ## Changes in this fork
 
