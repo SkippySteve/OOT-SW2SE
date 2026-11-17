@@ -21,6 +21,7 @@
 // handles them; see BackupReader.
 
 import AppKit
+import CryptoKit
 import UniformTypeIdentifiers
 import WebKit
 
@@ -71,6 +72,122 @@ let bridgeShim = """
   });
 })();
 """
+
+// MARK: - Updates
+
+/// Signed updates (update/README.md). Each release carries update.json, listing
+/// the files of every platform with their SHA-256, and update.json.sig: an
+/// ECDSA P-256 signature over it (SHA-256, raw r||s, base64) made in GitHub
+/// Actions with a key only the repository holds. The public key ships in the
+/// app (Resources/update-key.pem); without it, updates are off. Same scheme as
+/// the Windows and Linux hosts.
+enum Updates {
+    static let repo = "SkippySteve/OOT-SW2SE"
+    static let releases = "https://github.com/\(repo)/releases"
+    static let maxManifestBytes = 64 * 1024
+    static let maxUpdateBytes = 256 * 1024 * 1024
+    /// Guides open in the default browser, but only IGN's wiki for this game
+    /// and this app's release notes.
+    static let guidePrefixes = ["https://www.ign.com/wikis/ocarina-of-time-remake/", releases + "/"]
+
+    /// What a manifest says about this platform's file.
+    struct Release: Sendable {
+        let version: String
+        let name: String
+        let sha256: String
+        let size: Int
+    }
+
+    static func publicKeyPEM() -> String? {
+        guard let url = Bundle.main.url(forResource: "update-key", withExtension: "pem"),
+              let pem = try? String(contentsOf: url, encoding: .utf8),
+              (try? P256.Signing.PublicKey(pemRepresentation: pem)) != nil else { return nil }
+        return pem
+    }
+
+    static func parseVersion(_ value: Any?) -> [Int]? {
+        guard let text = value as? String,
+              let match = text.wholeMatch(of: /v?([0-9]{1,4})\.([0-9]{1,4})\.([0-9]{1,6})/) else { return nil }
+        return [Int(match.1)!, Int(match.2)!, Int(match.3)!]
+    }
+
+    static func isNewer(_ latest: String, than current: String) -> Bool {
+        guard let a = parseVersion(latest), let b = parseVersion(current) else { return false }
+        return b.lexicographicallyPrecedes(a)
+    }
+
+    static func isGuide(_ url: String) -> Bool {
+        url.count <= 500 && !url.contains(where: { "\"<>\\ \t\r\n".contains($0) }) && guidePrefixes.contains { url.hasPrefix($0) }
+    }
+
+    static func download(_ address: String, limit: Int) async throws -> Data {
+        guard address.hasPrefix("https://"), let url = URL(string: address) else {
+            throw HostError("Updates are only downloaded over HTTPS.")
+        }
+        var request = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 30)
+        request.setValue("OOT-SW2SE", forHTTPHeaderField: "User-Agent")
+        let (data, response) = try await URLSession.shared.data(for: request)
+        guard (response as? HTTPURLResponse)?.statusCode == 200 else { throw HostError("The update could not be downloaded.") }
+        guard data.count <= limit else { throw HostError("The update is larger than expected.") }
+        return data
+    }
+
+    /// Downloads and checks the manifest; nil release when it has no macOS file.
+    static func check(publicKeyPEM pem: String,
+                      fetch: @Sendable (String, Int) async throws -> Data = { try await download($0, limit: $1) })
+        async throws -> (version: String, release: Release?) {
+        let data = try await fetch(releases + "/latest/download/update.json", maxManifestBytes)
+        let signatureText = try await fetch(releases + "/latest/download/update.json.sig", 1024)
+        guard let key = try? P256.Signing.PublicKey(pemRepresentation: pem),
+              let raw = Data(base64Encoded: String(decoding: signatureText, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)),
+              let signature = try? P256.Signing.ECDSASignature(rawRepresentation: raw),
+              key.isValidSignature(signature, for: data) else {
+            throw HostError("The update's signature is not valid. Nothing was installed.")
+        }
+        guard let manifest = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              manifest["format"] as? Int == 1, let version = manifest["version"] as? String, parseVersion(version) != nil else {
+            throw HostError("The update manifest is malformed.")
+        }
+        guard let asset = (manifest["assets"] as? [String: Any])?["macos"] as? [String: Any] else { return (version, nil) }
+        guard let name = asset["name"] as? String, name.wholeMatch(of: /[A-Za-z0-9][A-Za-z0-9._-]{0,127}/) != nil,
+              let digest = asset["sha256"] as? String, digest.wholeMatch(of: /[0-9a-f]{64}/) != nil,
+              let size = asset["size"] as? Int, size > 0, size <= maxUpdateBytes else {
+            throw HostError("The update manifest is malformed.")
+        }
+        return (version, Release(version: version, name: name, sha256: digest, size: size))
+    }
+
+    /// Downloads and checks the new app, then puts it in place of this one.
+    /// The old app goes to the Trash-like temporary folder FileManager uses
+    /// for the swap; nothing is replaced unless every check passed.
+    static func install(_ release: Release, over app: URL) async throws {
+        let data = try await download("\(releases)/download/v\(release.version)/\(release.name)", limit: release.size)
+        let digest = SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+        guard data.count == release.size, digest == release.sha256 else {
+            throw HostError("The downloaded update does not match its checksum. Nothing was installed.")
+        }
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent("oot-sw2se-update-" + UUID().uuidString)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let zip = folder.appendingPathComponent("update.zip")
+        try data.write(to: zip)
+        let unzip = Process()
+        unzip.executableURL = URL(fileURLWithPath: "/usr/bin/ditto")
+        unzip.arguments = ["-x", "-k", zip.path, folder.appendingPathComponent("app").path]
+        try unzip.run()
+        unzip.waitUntilExit()
+        let newApp = folder.appendingPathComponent("app").appendingPathComponent("OOT SW2SE.app")
+        guard unzip.terminationStatus == 0,
+              Bundle(url: newApp)?.object(forInfoDictionaryKey: "CFBundleIdentifier") as? String == Bundle.main.bundleIdentifier else {
+            throw HostError("The update does not contain OOT SW2SE.app.")
+        }
+        do {
+            _ = try FileManager.default.replaceItemAt(app, withItemAt: newApp)
+        } catch {
+            throw HostError("\(app.deletingLastPathComponent().path) can't be written. Download the new version from \(releases).")
+        }
+    }
+}
 
 // MARK: - Errors
 
@@ -481,6 +598,11 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate,
         let configuration = WKWebViewConfiguration()
         let controller = WKUserContentController()
         controller.addUserScript(WKUserScript(source: bridgeShim, injectionTime: .atDocumentStart, forMainFrameOnly: true))
+        // Tells the page what this host offers beyond the three requests.
+        let auto = ProcessInfo.processInfo.environment["OOT_SW2SE_NO_UPDATE_CHECK"] != "1"
+        let features = updateKey == nil ? "{}" : "{\"updates\":{\"auto\":\(auto),\"releases\":\"\(Updates.releases)\"}}"
+        controller.addUserScript(WKUserScript(source: "window.chrome.webview.hostFeatures = \(features);",
+                                              injectionTime: .atDocumentStart, forMainFrameOnly: true))
         controller.add(WeakScriptMessageHandler(self), name: "host")
         configuration.userContentController = controller
         // The editor is fully offline; keep nothing on disk between launches.
@@ -601,6 +723,17 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate,
             saveFolder(entries: request["files"] as? [[String: String]], name: request["name"] as? String, completion: finish)
         case "savePatch":
             savePatch(name: request["name"] as? String, contents: request["contents"] as? String, completion: finish)
+        case "openUrl":
+            if let url = request["url"] as? String, Updates.isGuide(url), let address = URL(string: url) {
+                NSWorkspace.shared.open(address)
+                finish(true, nil)
+            } else {
+                finish(nil, HostError("Only IGN's Ocarina of Time Remake guides can be opened."))
+            }
+        case "checkUpdate":
+            checkUpdate(completion: finish)
+        case "installUpdate":
+            installUpdate(completion: finish)
         default:
             finish(nil, HostError("Unknown editor action."))
         }
@@ -615,6 +748,43 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate,
     }
 
     // MARK: Host actions
+
+    private let updateKey = Updates.publicKeyPEM()
+    private var pendingRelease: Updates.Release?
+
+    private func checkUpdate(completion: @escaping Completion) {
+        guard let key = updateKey else { return completion(nil, HostError("Updates are off for this copy of the app.")) }
+        Task { @MainActor in
+            do {
+                let (latest, release) = try await Updates.check(publicKeyPEM: key)
+                let newer = Updates.isNewer(latest, than: editorVersion)
+                self.pendingRelease = newer ? release : nil
+                completion(["current": editorVersion, "latest": latest, "available": newer && release != nil,
+                            "notes": "\(Updates.releases)/tag/v\(latest)"], nil)
+            } catch {
+                completion(nil, error)
+            }
+        }
+    }
+
+    private func installUpdate(completion: @escaping Completion) {
+        guard let release = pendingRelease else { return completion(nil, HostError("Check for updates first.")) }
+        let app = Bundle.main.bundleURL
+        Task { @MainActor in
+            do {
+                try await Updates.install(release, over: app)
+                completion(true, nil)
+                // Reopen the new app once this one has quit.
+                let relaunch = Process()
+                relaunch.executableURL = URL(fileURLWithPath: "/bin/sh")
+                relaunch.arguments = ["-c", "sleep 1; /usr/bin/open -n \"$0\"", app.path]
+                try? relaunch.run()
+                NSApp.terminate(nil)
+            } catch {
+                completion(nil, error)
+            }
+        }
+    }
 
     /// Asks for a backup or save folder, then reads it off the main thread.
     /// Completes with `nil` when the user cancels.

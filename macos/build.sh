@@ -57,6 +57,10 @@ if [[ ! -f "$repo/LICENSE" ]]; then
   exit 1
 fi
 cp "$repo/LICENSE" "$staged/Contents/Resources/LICENSE.txt"
+# The key update manifests are signed with (update/README.md); without it, updates are off.
+if [[ -f "$repo/update/public-key.pem" ]]; then
+  cp "$repo/update/public-key.pem" "$staged/Contents/Resources/update-key.pem"
+fi
 
 # Build the .icns from the Windows .ico. Its images are PNGs (16, 24, 32, 48,
 # 64, 128 and 256 px): each is extracted as ico-<size>.png and used as-is

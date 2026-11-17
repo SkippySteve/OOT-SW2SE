@@ -15,6 +15,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import unittest
 import zipfile
 from unittest import mock
@@ -909,3 +910,102 @@ class AppWindowTests(TempDirTest):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class UpdateTests(TempDirTest):
+    """Signed updates: the manifest, its signature, the download and the swap."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "update"))
+        import sign_manifest
+        self.signer = sign_manifest
+        self.key = os.path.join(self.root, "key.pem")
+        subprocess.run(["openssl", "ecparam", "-name", "prime256v1", "-genkey", "-noout", "-out", self.key], check=True,
+                       capture_output=True)
+        self.public = subprocess.run(["openssl", "ec", "-in", self.key, "-pubout"], check=True,
+                                     capture_output=True).stdout
+        self.app = os.path.join(self.root, "apps", "OOT-SW2SE.AppImage")
+        write(self.app, b"old app")
+        os.chmod(self.app, 0o755)
+        self.files: dict[str, bytes] = {}
+        self.release("1.2.0", b"new app")
+
+    def release(self, version: str, app: bytes, sign: bool = True) -> None:
+        asset = os.path.join(self.root, f"OOT-SW2SE-{version}-linux-x86_64.AppImage")
+        write(asset, app)
+        manifest = self.signer.manifest(version, [asset])
+        base = "https://example.invalid/releases"
+        self.files = {base + "/latest/download/update.json": manifest,
+                      base + "/latest/download/update.json.sig": self.signer.sign(manifest, self.key).encode(),
+                      f"{base}/download/v{version}/OOT-SW2SE-{version}-linux-x86_64.AppImage": app}
+        if not sign:
+            self.files[base + "/latest/download/update.json"] = manifest.replace(b'"size"', b'"size" ')
+
+    def updater(self, version: str = "1.0.2") -> host.Updater:
+        def download(url: str, limit: int) -> bytes:
+            if url not in self.files:
+                raise host.HostError("404 " + url)
+            data = self.files[url]
+            if len(data) > limit:
+                raise host.HostError("The update is larger than expected.")
+            return data
+        return host.Updater(version, self.public, ("linux-appimage", self.app), download=download,
+                            base="https://example.invalid/releases")
+
+    def test_signature_roundtrip(self) -> None:
+        der = subprocess.run(["openssl", "dgst", "-sha256", "-sign", self.key], input=b"x", capture_output=True,
+                             check=True).stdout
+        self.assertEqual(host.der_signature(self.signer.raw_signature(der)), der)
+
+    def test_check_and_install(self) -> None:
+        updater = self.updater()
+        self.assertEqual(updater.feature()["releases"], "https://example.invalid/releases")
+        self.assertEqual(updater.check()["available"], True)
+        self.assertEqual(updater.install(), {"installed": "1.2.0"})
+        with open(self.app, "rb") as file:
+            self.assertEqual(file.read(), b"new app")
+        self.assertTrue(os.stat(self.app).st_mode & 0o111, "still executable")
+        self.assertEqual(updater.restart, self.app)
+
+    def test_nothing_newer(self) -> None:
+        updater = self.updater("1.2.0")
+        self.assertFalse(updater.check()["available"])
+        with self.assertRaisesRegex(host.HostError, "already the newest"):
+            updater.install()
+
+    def test_tampered_manifest_or_file_is_refused(self) -> None:
+        self.release("1.2.0", b"new app", sign=False)
+        with self.assertRaisesRegex(host.HostError, "signature is not valid"):
+            self.updater().check()
+        self.release("1.2.0", b"new app")
+        url = next(url for url in self.files if url.endswith(".AppImage"))
+        self.files[url] = b"bad app"  # same size, other bytes
+        with self.assertRaisesRegex(host.HostError, "checksum"):
+            self.updater().install()
+        with open(self.app, "rb") as file:
+            self.assertEqual(file.read(), b"old app", "nothing was replaced")
+        other = subprocess.run(["openssl", "ecparam", "-name", "prime256v1", "-genkey", "-noout"], check=True,
+                               capture_output=True).stdout
+        other_key = os.path.join(self.root, "other.pem")
+        write(other_key, other)
+        self.public = subprocess.run(["openssl", "ec", "-in", other_key, "-pubout"], check=True, capture_output=True).stdout
+        with self.assertRaisesRegex(host.HostError, "signature is not valid"):
+            self.updater().check()
+
+    def test_off_without_key_or_target(self) -> None:
+        self.assertIsNone(host.Updater("1.0.2", None, ("linux-pyz", self.app)).feature())
+        self.assertIsNone(host.Updater("1.0.2", self.public, None).feature())
+        with self.assertRaisesRegex(host.HostError, "off"):
+            host.Updater("1.0.2", None, None).check()
+
+    def test_guides_open_only_ign_and_release_notes(self) -> None:
+        with mock.patch.object(host.webbrowser, "open") as opened:
+            self.assertTrue(host.open_guide("https://www.ign.com/wikis/ocarina-of-time-remake/All_Song_Locations"))
+            self.assertTrue(host.open_guide(host.UPDATE_RELEASES + "/tag/v1.2.0"))
+            for url in ("https://evil.example/", "file:///etc/passwd", "https://www.ign.com/wikis/other/",
+                        "https://www.ign.com/wikis/ocarina-of-time-remake/x y", None):
+                with self.assertRaises(host.HostError):
+                    host.open_guide(url)
+        time.sleep(0.1)
+        self.assertEqual(opened.call_count, 2)
