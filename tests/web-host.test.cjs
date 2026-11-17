@@ -75,12 +75,6 @@ test('a PC port\'s game or data folder opens the save folder of the profile it u
     const entries = layout(name, files);
     assert.deepEqual(entries.map(([to]) => to), expected, name);
     assert.equal(opened(entries).slots.length, 2, name);
-    // The folder-handle reader finds these files without listing the folder.
-    for (const [, from] of entries) {
-      const candidates = [...host.CANDIDATES, ...host.PORT_BASES.filter(base => from.startsWith(base))
-        .flatMap(base => host.profileCandidates(base + from.slice(base.length).split('/')[0] + '/'))];
-      assert.ok(candidates.includes(from), name + ': ' + from);
-    }
   }
   // Several profiles: the one the ports open, else a list to pick from.
   const stray = '0123456789abcdef0123456789abcdef';
@@ -91,6 +85,53 @@ test('a PC port\'s game or data folder opens the save folder of the profile it u
   // Saves in the picked folder itself keep the old rules.
   assert.equal(layout('Backup', [...pair('files/slot_01/'), ...profile('save/' + user + '/')])[0][0],
     'Backup/files/slot_01/progress.sav');
+});
+
+// A folder tree as the File System Access API shows it, built from a file list.
+function fakeFolder(name, files) {
+  const dir = (path) => ({
+    kind: 'directory', name: path.split('/').filter(Boolean).at(-1) ?? name,
+    async getDirectoryHandle(child) {
+      if (!files.some(file => file.startsWith(path + child + '/'))) throw Object.assign(new Error('missing'), { name: 'NotFoundError' });
+      return dir(path + child + '/');
+    },
+    async getFileHandle(child) {
+      if (!files.includes(path + child)) throw Object.assign(new Error('missing'), { name: 'NotFoundError' });
+      return { kind: 'file', getFile: async () => ({ size: 1, arrayBuffer: async () => new Uint8Array([7]).buffer }) };
+    },
+    async *entries() {
+      const names = new Set(files.filter(file => file.startsWith(path)).map(file => file.slice(path.length).split('/')));
+      for (const parts of names) yield [parts[0], parts.length > 1 ? dir(path + parts[0] + '/') : await this.getFileHandle(parts[0])];
+    },
+  });
+  return dir('');
+}
+
+test('Switch emulators: Lichii, Fritchii and Eden save folders open from any folder on the way', async () => {
+  const profile = 'E571F9CCBF8984318D5EE33D0A8D0868';
+  const save = base => [...pair(base + 'slot_00/'), ...pair(base + 'slot_03/'), base + 'option.sav', base + 'account.sav'];
+  const expected = ['Backup/files/slot_00/progress.sav', 'Backup/files/slot_00/caption.sav',
+    'Backup/files/slot_03/progress.sav', 'Backup/files/slot_03/caption.sav', 'Backup/files/option.sav', 'Backup/files/account.sav'];
+  const lichii = [...save(`nand/user/save/0000000000000000/${profile}/0400486024DEC000/`),
+    `nand/user/save/0000000000000000/${profile}/0400C3F00006E000/Play/account.sav`, 'nand/system/save/8000000000000010/x'];
+  const cases = [
+    ['lichii', lichii], ['nand', lichii.map(file => file.slice('nand/'.length))],
+    [profile, save('0400486024DEC000/')],
+    ['eden', save('nand/user/save/account/0123/0400486024DEC000/0/')],
+    ['Fritchii', [...save('user/nand/user/save/0000000000000000/AB12/0400486024DEC000/'), 'fritchii.exe']],
+    ['longshot', [...save('save/5a3c9e1f0b7d24680000000000000001/'), 'cache/0/x']],
+    ['ReLink', [...save('user/save/5a3c9e1f0b7d24680000000000000001/'), 'image.bin']],
+  ];
+  for (const [name, files] of cases) {
+    // Folder upload field: every file is listed.
+    assert.deepEqual(layout(name, files).map(([to]) => to), expected, name + ' (file list)');
+    // Folder handles: only the files the layouts lead to are looked up.
+    const { paths, open } = await host.probeFolder(fakeFolder(name, files));
+    assert.deepEqual(host.backupLayout(name, paths).map(([to]) => to), expected, name + ' (folder handles)');
+    assert.equal((await host.readBackup(name, paths, open)).length, 6);
+  }
+  const two = [...save('nand/user/save/0000000000000000/AAAA/0400486024DEC000/'), ...save('nand/user/save/0000000000000000/BBBB/0400486024DEC000/')];
+  assert.throws(() => layout('lichii', two), /several profiles\. Open one of them: AAAA, BBBB\./);
 });
 
 test('folders without a complete save are refused', () => {
